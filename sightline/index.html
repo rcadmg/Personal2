@@ -432,12 +432,15 @@ async function overpassOnce(host,q,ms){
 }
 async function overpass(q,ms){
   const hosts=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter'];
-  let last;
+  const errs=[];
   for(const h of hosts){
-    try{return await overpassOnce(h,q,ms||28000)}
-    catch(e){last=e.name==='AbortError'?new Error('no answer in time'):e}
+    try{return await overpassOnce(h,q,ms||20000)}
+    catch(e){
+      const m=e&&e.name==='AbortError'?'no answer in time':/failed to fetch|load failed|networkerror/i.test((e&&e.message)||'')?'could not connect':(e&&e.message)||'error';
+      errs.push(new URL(h).hostname+': '+m);
+    }
   }
-  throw last;
+  throw new Error(errs.join('; '));
 }
 function classify(t){
   if(t.natural==='peak')return['peak','Peak'];
@@ -478,43 +481,94 @@ function progEnd(tok,text){
   $('pstage').textContent=text;$('ptime').textContent=Math.round((Date.now()-PR.t0)/1000)+'s';
   setTimeout(()=>{if(tok===S.token)$('progress').hidden=true},3500);
 }
+const WIKI_RULES=[
+  [/\b(waterfall)\b/,'landmark','Waterfall'],
+  [/\b(glacier)\b/,'water','Glacier'],
+  [/\b(mountain pass|pass)\b/,'peak','Pass'],
+  [/\b(lake|tarn|mere|reservoir|loch|lough|lagoon|bay|estuary)\b/,'water',null],
+  [/\b(mountain|fell|peak|summit|hill|crag|pike|ridge|massif|volcano)\b/,'peak',null],
+  [/\b(city)\b/,'place','City'],
+  [/\b(town)\b/,'place','Town'],
+  [/\b(village|hamlet|parish|settlement|locality)\b/,'place',null],
+  [/\b(castle|abbey|priory|lighthouse|viewpoint|monument|stone circle|island|headland|cape|bridge|cathedral|church|tower)\b/,'landmark',null]
+];
+const cap=w=>w.charAt(0).toUpperCase()+w.slice(1);
+function wikiClass(desc){
+  const d=String(desc||'').toLowerCase().split(/ in | on | near | within /)[0];
+  if(/\b(river|stream|canal|brook|beck)\b/.test(d)&&!/\b(lake|tarn|reservoir|village|town)\b/.test(d))return null;
+  for(const [re,cat,sub] of WIKI_RULES){const m=d.match(re);if(m)return[cat,sub||cap(m[1])]}
+  return null;
+}
+async function wikiRecs(lat,lon,r){
+  const pts=[[lat,lon]];
+  if(r>10000){const d=Math.min(r-10000,18000);for(let i=0;i<6;i++)pts.push(destination(lat,lon,i*60,d))}
+  const rad=Math.min(r,10000);
+  const jobs=pts.map(async([la,lo])=>{
+    const url='https://en.wikipedia.org/w/api.php?action=query&format=json&origin=*&generator=geosearch&ggscoord='+la.toFixed(5)+'%7C'+lo.toFixed(5)+'&ggsradius='+rad+'&ggslimit=100&prop=coordinates%7Cdescription&colimit=100&coprimary=primary';
+    const ctl=new AbortController(),to=setTimeout(()=>ctl.abort(),12000);
+    try{const res=await fetch(url,{signal:ctl.signal});if(!res.ok)throw new Error('answered '+res.status);return await res.json()}
+    finally{clearTimeout(to)}
+  });
+  const results=await Promise.allSettled(jobs),out=[];let ok=0;
+  for(const rs of results){
+    if(rs.status!=='fulfilled')continue;ok++;
+    const pages=(rs.value.query&&rs.value.query.pages)||{};
+    for(const k in pages){
+      const pg=pages[k],c=pg.coordinates&&pg.coordinates[0];
+      if(!c||!pg.description)continue;
+      const cl=wikiClass(pg.description);if(!cl)continue;
+      out.push({name:pg.title.replace(/\s*\(.*\)$/,''),cat:cl[0],sub:cl[1],lat:c.lat,lon:c.lon,ele:null});
+    }
+  }
+  if(!ok)throw new Error('Wikipedia: could not connect');
+  return out;
+}
+function osmRecs(els){
+  const out=[];
+  for(const el of els){
+    const t=el.tags||{};if(!t.name)continue;
+    const c=classify(t);if(!c)continue;
+    const lat=el.lat??(el.center&&el.center.lat),lon=el.lon??(el.center&&el.center.lon);
+    if(!Number.isFinite(lat)||!Number.isFinite(lon))continue;
+    const ele=parseFloat(String(t.ele||'').replace(',','.'));
+    out.push({name:t.name,cat:c[0],sub:c[1],lat,lon,ele:Number.isFinite(ele)?ele:null});
+  }
+  return out;
+}
 async function findFeatures(){
   if(S.lat==null)return;
   const tok=++S.token;
   S.radiusKm=+$('radius').value;
   S.feats=[];listKey='';mapKey='';scheduleDraw();
-  const stages=stageQueries(S.lat,S.lon,S.radiusKm*1000);
+  const r=S.radiusKm*1000;
+  const stages=[{kind:'wiki',label:'well-known places (Wikipedia)',run:()=>wikiRecs(S.lat,S.lon,r)},
+    ...stageQueries(S.lat,S.lon,r).map(st=>({kind:'osm',label:st.label,run:async()=>osmRecs((await overpass(st.q,st.ms)).elements||[])}))];
   progStart(stages.length+1);status('');
-  const seen=new Set();let nextId=0;
-  const ingest=els=>{
-    let n=0;
-    for(const el of els){
-      const t=el.tags||{};if(!t.name)continue;
-      const c=classify(t);if(!c)continue;
-      const lat=el.lat??(el.center&&el.center.lat),lon=el.lon??(el.center&&el.center.lon);
-      if(!Number.isFinite(lat)||!Number.isFinite(lon))continue;
-      const key=t.name.toLowerCase()+'|'+c[1]+'|'+lat.toFixed(2)+','+lon.toFixed(2);
-      if(seen.has(key))continue;seen.add(key);
-      const ele=parseFloat(String(t.ele||'').replace(',','.'));
-      const f={id:nextId++,name:t.name,cat:c[0],sub:c[1],lat,lon,
-        ele:Number.isFinite(ele)?ele:null,eleSrc:Number.isFinite(ele)?'osm':'',eleTried:false};
-      f.dist=haversine(S.lat,S.lon,lat,lon);f.bearing=bearingTo(S.lat,S.lon,lat,lon);
-      if(f.dist>=50){S.feats.push(f);n++}
+  const names=new Map();let nextId=0;
+  const ingest=recs=>{
+    for(const rec of recs){
+      const key=rec.name.toLowerCase()+'|'+rec.cat,list=names.get(key)||[];
+      if(list.some(q=>haversine(q[0],q[1],rec.lat,rec.lon)<1500))continue;
+      list.push([rec.lat,rec.lon]);names.set(key,list);
+      const f={id:nextId++,name:rec.name,cat:rec.cat,sub:rec.sub,lat:rec.lat,lon:rec.lon,
+        ele:rec.ele,eleSrc:rec.ele!=null?'osm':'',eleTried:false};
+      f.dist=haversine(S.lat,S.lon,f.lat,f.lon);f.bearing=bearingTo(S.lat,S.lon,f.lat,f.lon);
+      if(f.dist>=50&&f.dist<=r*1.05)S.feats.push(f);
     }
-    return n;
   };
-  const failed=[];let aborted=false;
+  const failed=[];let okStages=0,osmDown=false;
   for(let i=0;i<stages.length;i++){
-    progStage(i,'looking up '+stages[i].label);
+    const st=stages[i];
+    if(st.kind==='osm'&&osmDown)continue;
+    progStage(i,'looking up '+st.label);
     try{
-      const data=await overpass(stages[i].q,stages[i].ms);
+      const recs=await st.run();
       if(tok!==S.token)return;
-      ingest(data.elements||[]);
-      listKey='';mapKey='';scheduleDraw();
+      ingest(recs);okStages++;listKey='';mapKey='';scheduleDraw();
     }catch(e){
       if(tok!==S.token)return;
-      failed.push(stages[i].label+' ('+(e&&e.message?e.message:'network error')+')');
-      if(i===0&&!S.feats.length){aborted=true;break}
+      failed.push(st.label+' ('+(e&&e.message?e.message:'network error')+')');
+      if(st.kind==='osm')osmDown=true;
     }
   }
   if(tok!==S.token)return;
@@ -526,13 +580,13 @@ async function findFeatures(){
   const n=S.feats.length;
   if(n){
     progEnd(tok,'Done: '+n+' named features');
-    status('Found '+n+' named features.'+(failed.length?' Could not load: '+failed.join('; ')+'. Press Search again to retry.':' Turn the view or change what is shown to explore them.'),failed.length>0);
-  }else if(aborted||failed.length===stages.length){
+    status('Found '+n+' named features.'+(failed.length?' Some lookups failed: '+failed.join('; ')+'. Press Search again to retry.':' Turn the view or change what is shown to explore them.'),failed.length>0);
+  }else if(failed.length){
     progEnd(tok,'Search failed');
-    status('OpenStreetMap did not answer: '+failed[0]+'. Its public servers may be busy. Check your connection and press Search again in a minute.',true);
+    status('Could not load any features. '+failed.join('; ')+'. Press Search again in a minute.',true);
   }else{
     progEnd(tok,'Search finished');
-    status(failed.length?'Some lookups failed ('+failed.join('; ')+') and nothing was found by the others. Press Search again.':'No named features within '+S.radiusKm+' km. Try a larger search radius.',failed.length>0);
+    status('No named features within '+S.radiusKm+' km. Try a larger search radius.');
   }
   scheduleDraw();
 }
