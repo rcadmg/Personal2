@@ -70,6 +70,9 @@ canvas.pinning{cursor:crosshair}
 @media (prefers-reduced-motion:reduce){.pfill.busy{animation:none}}
 .ptext{display:flex;justify-content:space-between;gap:12px;margin-top:6px;font-size:12px;color:var(--muted)}
 .ptext span:last-child{font-family:var(--font-mono)}
+.stat{margin:0 0 6px;font-size:12px;color:var(--muted)}
+.stat:empty{display:none}
+.btnrow{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 14px}
 .status{min-height:20px;color:var(--muted);font-size:13px}
 .status.err{color:var(--warn)}
 .side{display:flex;flex-direction:column;gap:14px;min-width:0}
@@ -214,10 +217,21 @@ ol.list small{font:400 11px/1.3 var(--font-mono);color:var(--muted)}
         <label><input type="checkbox" data-layer="water" checked><span class="dot water"></span>Water &amp; ice</label>
         <label><input type="checkbox" data-layer="place" checked><span class="dot place"></span>Towns &amp; villages</label>
         <label><input type="checkbox" data-layer="landmark" checked><span class="dot landmark"></span>Landmarks</label>
-        <label><input type="checkbox" data-opt="horizon" checked>Eye-level line</label>
+        <label><input type="checkbox" data-opt="horizon">Eye-level line</label>
         <label><input type="checkbox" data-opt="ruler" checked>Bearing scale</label>
         <label><input type="checkbox" data-opt="inset" checked>Position inset</label>
         <label><input type="checkbox" data-opt="caption" checked>Coordinates</label>
+        <label><input type="checkbox" data-opt="terrain" checked>Hide if terrain blocks</label>
+        <label><input type="checkbox" data-opt="skycheck" checked>Check photo skyline</label>
+        <label><input type="checkbox" data-opt="terrainLine" checked>Terrain outline</label>
+        <label><input type="checkbox" data-opt="skyLine" checked>Photo skyline</label>
+      </div>
+      <p class="stat" id="terrainStat"></p>
+      <p class="stat" id="skyStat"></p>
+      <p class="stat">Dashed blue line: skyline predicted from terrain data. Yellow line: skyline found in the photo.</p>
+      <div class="btnrow">
+        <button class="btn" id="alignBtn" type="button" disabled>Auto-align to skyline</button>
+        <button class="btn" id="undoBtn" type="button" hidden>Undo</button>
       </div>
       <div class="ctl">
         <label for="radius">Search radius</label><output id="radiusOut">30 km</output>
@@ -237,11 +251,12 @@ ol.list small{font:400 11px/1.3 var(--font-mono);color:var(--muted)}
     <section class="card">
       <h2 id="listTitle">In view</h2>
       <p class="empty" id="listEmpty">Open a photo to see what is in view, left to right.</p>
+      <p class="stat" id="hiddenNote"></p>
       <ol class="list" id="list"></ol>
     </section>
   </aside>
 </main>
-<p class="foot">Features come from OpenStreetMap contributors through the Overpass API; terrain heights from Open-Meteo. Labels do not account for hills that block the view, so a name can appear for something hidden behind a ridge. If the compass reading in your photo is a little off, drag the image sideways, or select a label and use Pin to photo.</p>
+<p class="foot">Features come from OpenStreetMap contributors through the Overpass API; terrain heights from Open-Meteo. Labels are hidden when terrain data or the skyline in the photo show that something is blocked. Trees, buildings and cloud are not in the terrain data, so a few labels can still be wrong. If the compass reading in your photo is a little off, drag the image sideways, or select a label and use Pin to photo.</p>
 </div>
 
 <input type="file" id="file" accept="image/*,.heic,.heif" hidden>
@@ -289,7 +304,8 @@ const S={
   feats:[],selected:null,pin:null,
   radiusKm:30,maxKm:30,maxLabels:30,
   layers:{peak:true,water:true,place:true,landmark:true},
-  opts:{horizon:true,ruler:true,inset:true,caption:true},
+  opts:{horizon:false,ruler:true,inset:true,caption:true,terrain:true,skycheck:true,terrainLine:true,skyLine:true},
+  sky:null,hidden:{t:0,s:0},undo:null,
   token:0
 };
 const cv=$('cv'),ctx=cv.getContext('2d');
@@ -319,6 +335,7 @@ async function openFile(file){
   S.fileName=(file.name||'photo').replace(/\.[^.]+$/,'');
   const sc=Math.min(1,MAX_CANVAS/Math.max(S.w,S.h));
   cv.width=Math.round(S.w*sc);cv.height=Math.round(S.h*sc);
+  S.sky=analyseSky(img);
   S.date=meta.DateTimeOriginal instanceof Date?meta.DateTimeOriginal:null;
   S.feats=[];S.selected=null;S.pin=null;S.pitch=0;
   // field of view from the 35 mm equivalent focal length
@@ -364,6 +381,7 @@ function setLocation(lat,lon,src){
   updateFacts();syncControls();
   $('findBtn').disabled=false;
   if(S.alt==null)fetchCameraElevation();
+  terrainReset();queueTerrain();
   clearTimeout(setLocation.t);
   setLocation.t=setTimeout(findFeatures,src==='drag'?600:50);
   scheduleDraw();
@@ -374,7 +392,7 @@ async function fetchCameraElevation(){
     const el=await fetchElevations([{lat:S.lat,lon:S.lon}]);
     if(tok!==S.token||S.alt!=null||!Number.isFinite(el[0]))return;
     S.alt=el[0]+EYE_HEIGHT;S.altSrc='terrain model plus eye height';
-    syncControls();updateFacts();scheduleDraw();
+    syncControls();updateFacts();scheduleDraw();queueTerrain();
   }catch(e){}
 }
 async function fetchElevations(pts){
@@ -639,6 +657,206 @@ function subText(f){
   return f.sub+' · '+d;
 }
 
+/* ---------- terrain line of sight ---------- */
+const BIN=2,NB=180,NS=28,TOL=0.35*RAD;
+const T={key:'',dists:[],bins:new Map(),busy:false,done:0,total:0,err:''};
+function terrainReset(){T.key='';T.dists=[];T.bins=new Map();T.done=0;T.total=0;T.err=''}
+// Highest elevation angle seen so far along one compass direction, at each sample distance.
+function binAngles(hs,dists,camE){
+  const cm=new Float32Array(dists.length);let m=-Infinity;
+  for(let i=0;i<dists.length;i++){
+    const h=Number.isFinite(hs[i])?hs[i]:camE,d=dists[i];
+    const a=Math.atan2(h-camE-d*d*(1-REFRACTION)/(2*R_EARTH),d);
+    if(a>m)m=a;cm[i]=m;
+  }
+  return cm;
+}
+function terrainAngleAt(az){
+  const pos=norm360(az)/BIN,fl=Math.floor(pos),i0=fl%NB,i1=(i0+1)%NB,fr=pos-fl;
+  const b0=T.bins.get(i0),b1=T.bins.get(i1);
+  if(!b0||!b1)return null;
+  return b0.top*(1-fr)+b1.top*fr;
+}
+// Highest angle of terrain in front of a feature (only ground nearer than the feature counts).
+function blockAngle(f){
+  const pos=norm360(f.bearing)/BIN,i0=Math.floor(pos)%NB,i1=(i0+1)%NB;
+  const b0=T.bins.get(i0),b1=T.bins.get(i1);
+  if(!b0||!b1||!T.dists.length)return null;
+  const lim=f.dist*.94;
+  const at=b=>{let k=-1;for(let i=0;i<T.dists.length;i++){if(T.dists[i]<lim)k=i;else break}return k<0?-Infinity:b.cm[k]};
+  return Math.min(at(b0),at(b1));
+}
+let terrainTimer=0;
+function queueTerrain(){clearTimeout(terrainTimer);terrainTimer=setTimeout(runTerrain,350)}
+async function elevChunk(pts){
+  for(let a=0;;a++){
+    try{return await fetchElevations(pts)}
+    catch(e){if(a>=2)throw e;await new Promise(r=>setTimeout(r,900*(a+1)))}
+  }
+}
+async function runTerrain(){
+  if(S.lat==null||S.alt==null||T.busy)return;
+  const key=S.lat.toFixed(4)+','+S.lon.toFixed(4)+'|'+Math.round(S.alt)+'|'+S.maxKm;
+  if(key!==T.key){
+    terrainReset();T.key=key;
+    const d1=Math.max(S.maxKm*1000,500),d0=Math.min(120,d1/4);
+    T.dists=Array.from({length:NS},(_,i)=>d0*Math.pow(d1/d0,i/(NS-1)));
+  }
+  const needed=()=>{
+    const half=S.fov/2+10,i0=Math.floor((S.heading-half)/BIN),i1=Math.ceil((S.heading+half)/BIN),out=[];
+    for(let i=i0;i<=i1;i++){const b=((i%NB)+NB)%NB;if(!T.bins.has(b)&&!out.includes(b))out.push(b)}
+    return out;
+  };
+  let need=needed();
+  if(!need.length)return;
+  T.busy=true;T.err='';T.total=T.bins.size+need.length;T.done=T.bins.size;
+  const myKey=T.key;
+  try{
+    while(need.length){
+      const batch=need.slice(0,12),pts=[];
+      for(const b of batch)for(const d of T.dists){const [la,lo]=destination(S.lat,S.lon,b*BIN,d);pts.push({lat:la,lon:lo})}
+      const chunks=[];for(let i=0;i<pts.length;i+=100)chunks.push(pts.slice(i,i+100));
+      const res=[];
+      for(let i=0;i<chunks.length;i+=2){
+        const part=await Promise.all(chunks.slice(i,i+2).map(elevChunk));
+        for(const q of part)res.push(...q);
+      }
+      if(myKey!==T.key)return;
+      batch.forEach((b,k)=>{
+        const cm=binAngles(res.slice(k*NS,(k+1)*NS),T.dists,S.alt);
+        T.bins.set(b,{cm,top:cm[cm.length-1]});
+      });
+      T.done=T.bins.size;scheduleDraw();
+      need=needed();
+      if(need.length)T.total=Math.max(T.total,T.bins.size+need.length);
+    }
+  }catch(e){T.err=(e&&e.message)||'network error'}
+  finally{T.busy=false;scheduleDraw()}
+}
+
+/* ---------- sky and land in the image (works on a photo or a video frame) ---------- */
+function medianFilter(a,k){
+  const out=new Int16Array(a.length),r=k>>1;
+  for(let i=0;i<a.length;i++){
+    const w=[];for(let j=Math.max(0,i-r);j<=Math.min(a.length-1,i+r);j++)w.push(a[j]);
+    w.sort((x,y)=>x-y);out[i]=w[w.length>>1];
+  }
+  return out;
+}
+// px is RGBA pixel data. Returns, for each column, the row where the sky ends (-1 where none was found).
+function detectSkyline(px,w,h){
+  const n=w*h,lum=new Float32Array(n);
+  for(let i=0,j=0;i<n;i++,j+=4)lum[i]=.299*px[j]+.587*px[j+1]+.114*px[j+2];
+  const bl=new Float32Array(n);
+  for(let y=0;y<h;y++){
+    const y0=Math.max(0,y-1),y1=Math.min(h-1,y+1);
+    for(let x=0;x<w;x++){
+      const x0=Math.max(0,x-1),x1=Math.min(w-1,x+1);let sum=0,c=0;
+      for(let yy=y0;yy<=y1;yy++)for(let xx=x0;xx<=x1;xx++){sum+=lum[yy*w+xx];c++}
+      bl[y*w+x]=sum/c;
+    }
+  }
+  const lim=Math.floor(h*.9);
+  let total=0;
+  {const m=[0,0,0],sq=[0,0,0];for(let i=0,j=0;i<n;i++,j+=4)for(let c=0;c<3;c++){const v=px[j+c];m[c]+=v;sq[c]+=v*v}
+   for(let c=0;c<3;c++){const mu=m[c]/n;total+=sq[c]/n-mu*mu}}
+  if(total<1)return null;
+  let best=null;
+  for(const t of [3,5,8,12,18,26,38]){
+    let ys=new Int16Array(w);
+    for(let x=0;x<w;x++){
+      let y=lim;
+      for(let r=2;r<lim;r++){if(Math.abs(bl[(r+1)*w+x]-bl[(r-1)*w+x])>t){y=r;break}}
+      ys[x]=y;
+    }
+    ys=medianFilter(ys,7);
+    const sS=[0,0,0],sQ=[0,0,0],gS=[0,0,0],gQ=[0,0,0];let nS=0,nG=0;
+    for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+      const j=(y*w+x)*4,sky=y<ys[x];
+      if(sky)nS++;else nG++;
+      for(let c=0;c<3;c++){const v=px[j+c];if(sky){sS[c]+=v;sQ[c]+=v*v}else{gS[c]+=v;gQ[c]+=v*v}}
+    }
+    const frac=nS/n;
+    if(frac<.03||frac>.9||!nG)continue;
+    let within=0;
+    for(let c=0;c<3;c++){
+      const ms=sS[c]/nS,mg=gS[c]/nG;
+      within+=(nS*(sQ[c]/nS-ms*ms)+nG*(gQ[c]/nG-mg*mg))/n;
+    }
+    const r2=1-within/total;
+    if(!best||r2>best.r2)best={r2,ys,frac,t};
+  }
+  if(!best||best.r2<.3)return null;
+  const out=new Int16Array(w);
+  for(let x=0;x<w;x++)out[x]=best.ys[x]>=lim-1?-1:best.ys[x];
+  return{ys:out,w,h,conf:best.r2,skyFrac:best.frac};
+}
+function analyseSky(src){
+  try{
+    const sw=src.naturalWidth||src.videoWidth||src.width,sh=src.naturalHeight||src.videoHeight||src.height;
+    if(!sw||!sh)return null;
+    const dw=Math.min(320,sw),dh=Math.max(8,Math.round(dw*sh/sw));
+    const c=document.createElement('canvas');c.width=dw;c.height=dh;
+    const x=c.getContext('2d',{willReadFrequently:true});
+    x.drawImage(src,0,0,dw,dh);
+    return detectSkyline(x.getImageData(0,0,dw,dh).data,dw,dh);
+  }catch(e){return null}
+}
+function skyYAt(x,W,H){
+  if(!S.sky)return -1;
+  const i=Math.min(S.sky.w-1,Math.max(0,Math.floor(x/W*S.sky.w))),y=S.sky.ys[i];
+  return y<0?-1:y*H/S.sky.h;
+}
+
+/* ---------- match the terrain skyline to the photo skyline ---------- */
+function projectEA(e,d,V){
+  const ce=Math.cos(e),se=Math.sin(e),cp=Math.cos(V.p),sp=Math.sin(V.p);
+  const yc=Math.cos(d)*ce*cp+se*sp;
+  if(yc<=0.02)return null;
+  return{x:V.cx+V.fpx*Math.sin(d)*ce/yc,y:V.cy-V.fpx*(-Math.cos(d)*ce*sp+se*cp)/yc};
+}
+function fitAlignment(heading,pitch,V,angleAt,skyY){
+  const cap=.15*V.H,half=Math.atan((V.W/2)/V.fpx)/RAD+2;
+  const costOf=(h,p)=>{
+    const VV={cx:V.cx,cy:V.cy,fpx:V.fpx,p:p*RAD};
+    let sum=0,n=0;
+    for(let a=-half;a<=half;a+=.5){
+      const ang=angleAt(h+a);if(ang==null)continue;
+      const pt=projectEA(ang,a*RAD,VV);
+      if(!pt||pt.x<0||pt.x>V.W)continue;
+      const ys=skyY(pt.x);if(ys<0)continue;
+      sum+=Math.min(Math.abs(pt.y-ys),cap);n++;
+    }
+    return n>=12?sum/n/V.H:null;
+  };
+  const base=costOf(heading,pitch);
+  if(base==null)return null;
+  let best={dh:0,dp:0,cost:base};
+  for(let dh=-10;dh<=10;dh+=.5)for(let dp=-8;dp<=8;dp+=.5){
+    const c=costOf(heading+dh,pitch+dp);if(c!=null&&c<best.cost)best={dh,dp,cost:c};
+  }
+  const c0=best;
+  for(let dh=c0.dh-.5;dh<=c0.dh+.5001;dh+=.1)for(let dp=c0.dp-.5;dp<=c0.dp+.5001;dp+=.1){
+    const c=costOf(heading+dh,pitch+dp);if(c!=null&&c<best.cost)best={dh,dp,cost:c};
+  }
+  return{dh:best.dh,dp:best.dp,cost:best.cost,base};
+}
+function setText(id,t){const el=$(id);if(el.textContent!==t)el.textContent=t}
+function updateStats(){
+  let t;
+  if(S.lat==null)t='Terrain check: waiting for a position.';
+  else if(S.alt==null)t='Terrain check: waiting for the camera height.';
+  else if(T.err)t='Terrain check unavailable ('+T.err+'). All features are shown.';
+  else if(T.busy)t='Terrain check: loading heights, '+T.done+' of '+T.total+' directions.';
+  else if(T.bins.size)t='Terrain check ready.';
+  else t='Terrain check: starting…';
+  setText('terrainStat',t);
+  setText('skyStat',!S.img?'':S.sky?'Photo skyline found ('+Math.round(S.sky.skyFrac*100)+'% of the frame is sky).':'No clear sky found in this photo, so the photo check is off.');
+  const h=S.hidden;
+  setText('hiddenNote',(h.t||h.s)?h.t+' hidden by terrain, '+h.s+' by the photo skyline.':'');
+  $('alignBtn').disabled=!(S.sky&&T.bins.size>=8);
+}
+
 /* ---------- drawing ---------- */
 function scheduleDraw(){if(!raf)raf=requestAnimationFrame(()=>{raf=0;draw()})}
 function rrect(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath()}
@@ -716,10 +934,24 @@ function draw(exporting){
   }
   // candidates
   const maxD=S.maxKm*1000,cand=[];
+  S.hidden={t:0,s:0};
   for(const f of S.feats){
     if(!S.layers[f.cat]||f.dist>maxD||f.dist<80)continue;
     const p=projectF(f,V);if(!p)continue;
     if(p.x<-4*u||p.x>W+4*u||p.y<4*u||p.y>H-rulerH-6*u)continue;
+    if(f.ele!=null){
+      if(S.opts.terrain&&!T.err){
+        const blk=blockAngle(f);
+        if(blk!=null&&p.e<blk-TOL){S.hidden.t++;continue}
+      }
+      if(S.opts.skycheck&&S.sky){
+        const sy=skyYAt(p.x,W,H);
+        if(sy>=0){
+          if(f.cat==='peak'){if(p.y>sy+.08*H){S.hidden.s++;continue}}
+          else if(p.y<sy-.08*H){S.hidden.s++;continue}
+        }
+      }
+    }
     f._p=p;f._score=score(f,p.e);cand.push(f);
   }
   cand.sort((a,b)=>b._score-a._score);
@@ -742,6 +974,26 @@ function draw(exporting){
     if(y==null)for(let t=0;t<40;t++){const yy=ay+16*u+t*(h+gap);if(yy+h>H-rulerH-4*u)break;if(!hit(x,yy,w,h)){y=yy;break}}
     if(y==null)continue;
     newPlaced.push({f,x,y,w,h,ax:f._p.x,ay,sub});
+  }
+  if(S.opts.terrainLine&&T.bins.size){
+    ctx.save();ctx.setLineDash([7*u,4*u]);ctx.strokeStyle='#4cc3e6';ctx.lineWidth=1.6*u;ctx.beginPath();
+    let pen=false;const half=Math.atan((W/2)/V.fpx)/RAD+3;
+    for(let a=-half;a<=half;a+=.25){
+      const ang=terrainAngleAt(S.heading+a),pt=ang==null?null:projectEA(ang,a*RAD,V);
+      if(!pt||pt.x<-10||pt.x>W+10||pt.y<-H||pt.y>2*H){pen=false;continue}
+      if(pen)ctx.lineTo(pt.x,pt.y);else{ctx.moveTo(pt.x,pt.y);pen=true}
+    }
+    ctx.stroke();ctx.restore();
+  }
+  if(S.opts.skyLine&&S.sky){
+    ctx.save();ctx.strokeStyle='#ffe14d';ctx.lineWidth=1.6*u;ctx.beginPath();
+    let pen=false;const sk=S.sky;
+    for(let i=0;i<sk.w;i++){
+      const y=sk.ys[i];if(y<0){pen=false;continue}
+      const px=(i+.5)/sk.w*W,py=y*H/sk.h;
+      if(pen)ctx.lineTo(px,py);else{ctx.moveTo(px,py);pen=true}
+    }
+    ctx.stroke();ctx.restore();
   }
   // leaders and markers
   ctx.lineWidth=1*u;
@@ -794,6 +1046,7 @@ function draw(exporting){
 
 /* ---------- side effects of a draw: list, map, facts ---------- */
 function afterDraw(){
+  updateStats();
   const key=placed.map(o=>o.f.id).join(',')+'|'+(S.selected?S.selected.id:'');
   if(key!==listKey){listKey=key;renderList()}
   syncMap();
@@ -837,7 +1090,7 @@ function syncControls(){
 }
 function setHeading(h,src){
   S.heading=norm360(h);if(src)S.headingSrc=src;
-  syncControls();scheduleDraw();queueElev();
+  syncControls();scheduleDraw();queueElev();queueTerrain();
 }
 
 /* ---------- selection and pinning ---------- */
@@ -957,18 +1210,37 @@ cv.addEventListener('keydown',e=>{
 new ResizeObserver(()=>scheduleDraw()).observe(cv);
 
 $('hdg').oninput=e=>setHeading(+e.target.value,'set with the slider');
-$('fov').oninput=e=>{S.fov=+e.target.value;S.fovSrc='set with the slider';syncControls();scheduleDraw();queueElev()};
+$('fov').oninput=e=>{S.fov=+e.target.value;S.fovSrc='set with the slider';syncControls();scheduleDraw();queueElev();queueTerrain()};
 $('tilt').oninput=e=>{S.pitch=+e.target.value;syncControls();scheduleDraw()};
-$('altIn').onchange=e=>{const v=parseFloat(e.target.value);S.alt=Number.isFinite(v)?v:null;S.altSrc=Number.isFinite(v)?'entered by hand':'';updateFacts();scheduleDraw();if(S.alt==null&&S.lat!=null)fetchCameraElevation()};
+$('altIn').onchange=e=>{const v=parseFloat(e.target.value);S.alt=Number.isFinite(v)?v:null;S.altSrc=Number.isFinite(v)?'entered by hand':'';updateFacts();scheduleDraw();terrainReset();queueTerrain();if(S.alt==null&&S.lat!=null)fetchCameraElevation()};
 $('radius').oninput=e=>{$('radiusOut').textContent=e.target.value+' km'};
 $('radius').onchange=()=>{S.radiusKm=+$('radius').value;if($('maxkm').value>S.radiusKm){$('maxkm').value=S.radiusKm;S.maxKm=S.radiusKm;$('maxkmOut').textContent=S.maxKm+' km'}findFeatures()};
-$('maxkm').oninput=e=>{S.maxKm=+e.target.value;$('maxkmOut').textContent=S.maxKm+' km';scheduleDraw();queueElev()};
+$('maxkm').oninput=e=>{S.maxKm=+e.target.value;$('maxkmOut').textContent=S.maxKm+' km';scheduleDraw();queueElev();queueTerrain()};
 $('maxlab').oninput=e=>{S.maxLabels=+e.target.value;$('maxlabOut').textContent=S.maxLabels;scheduleDraw()};
 $('findBtn').onclick=findFeatures;
 document.querySelectorAll('[data-layer]').forEach(c=>c.onchange=()=>{S.layers[c.dataset.layer]=c.checked;scheduleDraw();queueElev()});
-document.querySelectorAll('[data-opt]').forEach(c=>c.onchange=()=>{S.opts[c.dataset.opt]=c.checked;scheduleDraw()});
+document.querySelectorAll('[data-opt]').forEach(c=>c.onchange=()=>{S.opts[c.dataset.opt]=c.checked;scheduleDraw();queueTerrain()});
 $('pinBtn').onclick=()=>{if(S.selected){S.pin=S.selected;updatePin();cv.scrollIntoView({block:'nearest',behavior:'smooth'})}};
 $('selClear').onclick=()=>select(null);
+$('alignBtn').onclick=()=>{
+  if(!S.sky||T.bins.size<8){status('Wait for the terrain check to finish, then try again.');return}
+  const V=viewObj();
+  const r=fitAlignment(S.heading,S.pitch,V,terrainAngleAt,x=>skyYAt(x,V.W,V.H));
+  if(!r){status('There is not enough skyline to compare yet. Wait for the terrain check to finish.');return}
+  if(Math.abs(r.dh)<.4&&Math.abs(r.dp)<.4){status('Already well aligned. Average gap between the two skylines is '+(r.base*100).toFixed(1)+'% of the photo height.');return}
+  if(r.cost<.05&&r.cost<r.base*.75){
+    S.undo={heading:S.heading,pitch:S.pitch,src:S.headingSrc};
+    setHeading(S.heading+r.dh,'aligned to the skyline');
+    S.pitch=clamp(S.pitch+r.dp,-30,30);syncControls();scheduleDraw();
+    $('undoBtn').hidden=false;
+    status('Aligned: turned '+(r.dh>0?'+':'')+r.dh.toFixed(1)+'° and tilted '+(r.dp>0?'+':'')+r.dp.toFixed(1)+'°. The skyline gap fell from '+(r.base*100).toFixed(1)+'% to '+(r.cost*100).toFixed(1)+'% of the photo height.');
+  }else status('No confident match between the terrain and the photo skyline. Adjust by hand, or select a label and use Pin to photo.',true);
+};
+$('undoBtn').onclick=()=>{
+  if(!S.undo)return;
+  S.pitch=S.undo.pitch;setHeading(S.undo.heading,S.undo.src);syncControls();scheduleDraw();
+  S.undo=null;$('undoBtn').hidden=true;status('Alignment undone.');
+};
 $('searchForm').onsubmit=e=>{e.preventDefault();const q=$('q').value.trim();if(q)searchPlace(q)};
 function typedLocation(){
   const la=parseFloat($('latIn').value),lo=parseFloat($('lonIn').value);
