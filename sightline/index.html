@@ -1,0 +1,854 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sightline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+/* Layout: wide photo stage on the left, instrument panel on the right; stacks on phones. */
+:root{
+  --bg:#e7edf0; --panel:#f6f9fa; --ink:#0f2330; --muted:#556b78; --line:#c8d4da;
+  --accent:#0b6c8c; --accent-ink:#ffffff; --field:#ffffff; --warn:#a4501b;
+  --c-peak:#e8a000; --c-water:#1d9fd3; --c-place:#5d7482; --c-landmark:#d6457c;
+  --font-ui:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-head:"Space Grotesk","Inter",system-ui,sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0a141a; --panel:#111f27; --ink:#e3edf2; --muted:#8ba2ae; --line:#23353f;
+    --accent:#4cc3e6; --accent-ink:#06222c; --field:#0b171d; --warn:#f0a56b;
+    --c-peak:#ffb21a; --c-water:#46c2f0; --c-place:#c3d3dc; --c-landmark:#ff7aa8;
+    color-scheme:dark;
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:14px/1.45 var(--font-ui);padding:0 max(16px,env(safe-area-inset-left,0px)) 40px}
+.wrap{max-width:1360px;margin:0 auto}
+header.top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:18px 0 14px}
+.brand{display:flex;align-items:center;gap:10px;font:700 22px/1 var(--font-head);letter-spacing:-.01em}
+.brand svg{width:28px;height:28px;color:var(--accent)}
+.tag{margin:0;color:var(--muted);flex:1 1 220px;min-width:0}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.btn{font:500 13px/1 var(--font-ui);padding:10px 14px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+.btn:hover:not(:disabled){border-color:var(--accent)}
+.btn:disabled{opacity:.45;cursor:default}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:20px;align-items:start}
+@media (max-width:980px){.layout{grid-template-columns:minmax(0,1fr)}}
+.stage{min-width:0;display:flex;flex-direction:column;gap:12px}
+.drop{border:1.5px dashed var(--line);border-radius:14px;background:var(--panel);padding:18px;display:flex;flex-direction:column;gap:14px;align-items:center;text-align:center}
+.drop.over{border-color:var(--accent)}
+.drop svg.example{width:100%;max-width:640px;height:auto;border-radius:8px}
+.drop h1{font:700 20px/1.2 var(--font-head);margin:0}
+.drop p{margin:0;color:var(--muted);max-width:52ch}
+.canvaswrap{position:relative;border-radius:12px;overflow:hidden;background:#000;line-height:0}
+canvas{width:100%;height:auto;display:block;touch-action:pan-y;cursor:grab}
+canvas.pinning{cursor:crosshair}
+.pinhint{position:absolute;left:12px;right:12px;bottom:56px;line-height:1.3;background:var(--accent);color:var(--accent-ink);padding:8px 12px;border-radius:8px;font-weight:600;text-align:center}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;margin:0;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.facts>div{background:var(--panel);padding:10px 12px;min-width:0}
+.facts dt{font:500 11px/1 var(--font-ui);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.facts dd{margin:0;font:500 13px/1.3 var(--font-mono);overflow-wrap:anywhere}
+.facts small{display:block;color:var(--muted);font:400 11px/1.3 var(--font-ui);margin-top:2px}
+.selbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:var(--panel);border:1px solid var(--accent);border-radius:10px;padding:10px 12px}
+.selbar .txt{flex:1 1 220px;min-width:0}
+.selbar strong{font:700 15px/1.2 var(--font-head);display:block;overflow-wrap:anywhere}
+.selbar span{font:400 12px/1.4 var(--font-mono);color:var(--muted)}
+.status{min-height:20px;color:var(--muted);font-size:13px}
+.status.err{color:var(--warn)}
+.side{display:flex;flex-direction:column;gap:14px;min-width:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;min-width:0}
+.card h2{font:700 14px/1 var(--font-head);margin:0 0 12px;letter-spacing:.01em}
+.map{height:240px;border-radius:8px;overflow:hidden;border:1px solid var(--line);margin-bottom:10px;background:var(--field)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);min-width:0}
+input[type=text],input[type=search],input[type=number]{font:400 13px var(--font-mono);color:var(--ink);background:var(--field);border:1px solid var(--line);border-radius:7px;padding:8px 9px;width:100%;min-width:0}
+.search{display:flex;gap:8px}
+.search input{font-family:var(--font-ui)}
+.hint{margin:8px 0 0;color:var(--muted);font-size:12px}
+.ctl{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;margin-bottom:12px}
+.ctl label{font-size:12px;color:var(--muted)}
+.ctl output{font:500 13px var(--font-mono);text-align:right}
+.ctl input[type=range]{grid-column:1/-1;width:100%;accent-color:var(--accent);margin:4px 0 0}
+.ctl .src{grid-column:1/-1;font-size:11px;color:var(--muted)}
+.checks{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;margin-bottom:14px}
+.checks label{display:flex;align-items:center;gap:8px;font-size:13px}
+.checks input{accent-color:var(--accent);margin:0}
+.dot{display:inline-block;width:10px;height:10px;flex:none}
+.dot.peak{background:var(--c-peak);clip-path:polygon(50% 0,100% 100%,0 100%)}
+.dot.water{background:var(--c-water);border-radius:50%}
+.dot.place{background:var(--c-place)}
+.dot.landmark{background:var(--c-landmark);transform:rotate(45deg) scale(.8)}
+ol.list{list-style:none;margin:0;padding:0;max-height:340px;overflow:auto;display:flex;flex-direction:column;gap:2px}
+ol.list button{all:unset;box-sizing:border-box;width:100%;display:grid;grid-template-columns:14px 1fr;gap:8px;padding:7px 8px;border-radius:7px;cursor:pointer;align-items:center}
+ol.list button:hover{background:var(--bg)}
+ol.list button[aria-current=true]{background:var(--bg);outline:1.5px solid var(--accent)}
+ol.list strong{font:600 13px/1.25 var(--font-ui);display:block;overflow-wrap:anywhere}
+ol.list small{font:400 11px/1.3 var(--font-mono);color:var(--muted)}
+.empty{color:var(--muted);font-size:13px;margin:0}
+.cam-pin span{display:block;width:18px;height:18px;border-radius:50%;background:var(--accent);border:3px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.4)}
+.foot{margin-top:22px;color:var(--muted);font-size:12px;max-width:80ch}
+@media (prefers-reduced-motion:no-preference){.btn{transition:border-color .15s}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 25 11 9l6 9 4-6 9 13z"/><circle cx="24" cy="7" r="2.4"/></svg>
+    Sightline
+  </div>
+  <p class="tag">Name the peaks, lakes and towns in your landscape photos.</p>
+  <div class="actions">
+    <button class="btn primary" id="openBtn" type="button">Open photo</button>
+    <button class="btn" id="saveBtn" type="button" disabled>Download PNG</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="stage" id="stage">
+    <div class="drop" id="drop">
+      <svg class="example" viewBox="0 0 640 300" role="img" aria-label="Example of a landscape photo with labelled peaks, a lake and a village">
+        <defs><linearGradient id="sk" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6f93ad"/><stop offset="1" stop-color="#d4dde1"/></linearGradient></defs>
+        <rect width="640" height="300" fill="url(#sk)"/>
+        <path d="M0 190 90 120 150 160 250 70 330 150 410 95 520 175 640 120V300H0z" fill="#51677a"/>
+        <path d="M0 235 120 190 230 225 340 185 470 230 640 195V300H0z" fill="#2f4a3f"/>
+        <path d="M60 262c70-14 150-6 220 4s120 6 200-6" stroke="#8fcfe6" stroke-width="10" stroke-linecap="round" fill="none" opacity=".85"/>
+        <g stroke="#fff" stroke-width="1" opacity=".8"><path d="M250 70V48M410 95V82M170 258V222"/></g>
+        <g fill="rgba(6,16,22,.78)"><rect x="196" y="22" width="112" height="28" rx="3"/><rect x="368" y="54" width="104" height="28" rx="3"/><rect x="120" y="194" width="100" height="28" rx="3"/></g>
+        <g fill="#e8a000"><path d="M250 66l6 10h-12z"/><path d="M410 91l6 10h-12z"/></g>
+        <circle cx="170" cy="258" r="4" fill="#1d9fd3"/>
+        <g fill="#fff" font-family="IBM Plex Mono,monospace" font-size="11"><text x="204" y="40">Peak 3,148 m</text><text x="376" y="72">Peak 2,760 m</text><text x="128" y="212">Lake · 4.2 km</text></g>
+        <g fill="rgba(6,16,22,.7)"><rect x="0" y="268" width="640" height="32"/></g>
+        <g stroke="#fff" stroke-width="1" opacity=".8"><path d="M40 300v-9M80 300v-9M120 300v-9M160 300v-9M200 300v-9M240 300v-9M280 300v-9M320 300v-14M360 300v-9M400 300v-9M440 300v-9M480 300v-9M520 300v-9M560 300v-9M600 300v-9"/></g>
+        <text x="320" y="283" fill="#fff" font-family="IBM Plex Mono,monospace" font-size="10" text-anchor="middle">045° NE</text>
+      </svg>
+      <h1>Drop a landscape photo here</h1>
+      <p>Sightline reads the GPS position and compass direction stored in the photo, looks up named features from OpenStreetMap, and draws them where they should appear. Photos without location data work too: click the map to say where you stood.</p>
+      <button class="btn primary" id="dropBtn" type="button">Choose a photo</button>
+    </div>
+
+    <div class="canvaswrap" id="canvasWrap" hidden>
+      <canvas id="cv" tabindex="0" aria-label="Photo with geographic labels. Drag sideways or use the arrow keys to turn the view."></canvas>
+      <div class="pinhint" id="pinHint" hidden></div>
+    </div>
+
+    <dl class="facts" id="facts" hidden>
+      <div><dt>Position</dt><dd id="fPos">—</dd><small id="fPosSrc"></small></div>
+      <div><dt>Camera elevation</dt><dd id="fAlt">—</dd><small id="fAltSrc"></small></div>
+      <div><dt>Facing</dt><dd id="fHdg">—</dd><small id="fHdgSrc"></small></div>
+      <div><dt>Field of view</dt><dd id="fFov">—</dd><small id="fFovSrc"></small></div>
+      <div><dt>Taken</dt><dd id="fDate">—</dd></div>
+    </dl>
+
+    <div class="selbar" id="selbar" hidden>
+      <div class="txt"><strong id="selName"></strong><span id="selMeta"></span></div>
+      <button class="btn" id="pinBtn" type="button">Pin to photo</button>
+      <button class="btn" id="selClear" type="button">Clear</button>
+    </div>
+
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+  </section>
+
+  <aside class="side">
+    <section class="card">
+      <h2>Where it was taken</h2>
+      <div class="map" id="map"></div>
+      <div class="row2">
+        <label class="f">Latitude<input id="latIn" type="text" inputmode="decimal" placeholder="46.85230"></label>
+        <label class="f">Longitude<input id="lonIn" type="text" inputmode="decimal" placeholder="9.53060"></label>
+      </div>
+      <form class="search" id="searchForm">
+        <input id="q" type="search" placeholder="Search for a place" aria-label="Search for a place">
+        <button class="btn" type="submit">Go</button>
+      </form>
+      <p class="hint" id="locHint">No GPS in the photo? Click the map, search for a place, or type coordinates. Drag the pin to fine-tune.</p>
+    </section>
+
+    <section class="card">
+      <h2>Camera</h2>
+      <div class="ctl">
+        <label for="hdg">Facing (compass bearing)</label><output id="hdgOut">0° N</output>
+        <input id="hdg" type="range" min="0" max="360" step="0.1" value="0">
+        <div class="src" id="hdgSrc"></div>
+      </div>
+      <div class="ctl">
+        <label for="fov">Field of view (horizontal)</label><output id="fovOut">69°</output>
+        <input id="fov" type="range" min="10" max="120" step="0.5" value="69">
+        <div class="src" id="fovSrc"></div>
+      </div>
+      <div class="ctl">
+        <label for="tilt">Tilt (up is positive)</label><output id="tiltOut">0°</output>
+        <input id="tilt" type="range" min="-30" max="30" step="0.1" value="0">
+      </div>
+      <label class="f" for="altIn">Camera elevation above sea level (m)
+        <input id="altIn" type="number" step="1" placeholder="from photo or terrain data">
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>Show</h2>
+      <div class="checks">
+        <label><input type="checkbox" data-layer="peak" checked><span class="dot peak"></span>Peaks &amp; passes</label>
+        <label><input type="checkbox" data-layer="water" checked><span class="dot water"></span>Water &amp; ice</label>
+        <label><input type="checkbox" data-layer="place" checked><span class="dot place"></span>Towns &amp; villages</label>
+        <label><input type="checkbox" data-layer="landmark" checked><span class="dot landmark"></span>Landmarks</label>
+        <label><input type="checkbox" data-opt="horizon" checked>Eye-level line</label>
+        <label><input type="checkbox" data-opt="ruler" checked>Bearing scale</label>
+        <label><input type="checkbox" data-opt="inset" checked>Position inset</label>
+        <label><input type="checkbox" data-opt="caption" checked>Coordinates</label>
+      </div>
+      <div class="ctl">
+        <label for="radius">Search radius</label><output id="radiusOut">30 km</output>
+        <input id="radius" type="range" min="5" max="80" step="5" value="30">
+      </div>
+      <div class="ctl">
+        <label for="maxkm">Draw features up to</label><output id="maxkmOut">30 km</output>
+        <input id="maxkm" type="range" min="1" max="80" step="1" value="30">
+      </div>
+      <div class="ctl">
+        <label for="maxlab">Most labels</label><output id="maxlabOut">30</output>
+        <input id="maxlab" type="range" min="5" max="80" step="1" value="30">
+      </div>
+      <button class="btn" id="findBtn" type="button" disabled>Search again</button>
+    </section>
+
+    <section class="card">
+      <h2 id="listTitle">In view</h2>
+      <p class="empty" id="listEmpty">Open a photo to see what is in view, left to right.</p>
+      <ol class="list" id="list"></ol>
+    </section>
+  </aside>
+</main>
+<p class="foot">Features come from OpenStreetMap contributors through the Overpass API; terrain heights from Open-Meteo. Labels do not account for hills that block the view, so a name can appear for something hidden behind a ridge. If the compass reading in your photo is a little off, drag the image sideways, or select a label and use Pin to photo.</p>
+</div>
+
+<input type="file" id="file" accept="image/*,.heic,.heif" hidden>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
+<script>
+(()=>{
+'use strict';
+const $=id=>document.getElementById(id);
+const RAD=Math.PI/180, R_EARTH=6371000, REFRACTION=0.13, EYE_HEIGHT=1.6, MAX_CANVAS=2400;
+const FONT_UI='"Space Grotesk",Inter,system-ui,sans-serif';
+const FONT_MONO='"IBM Plex Mono",ui-monospace,Menlo,monospace';
+const CAT={peak:'#ffb21a',water:'#46c2f0',place:'#f1f5f7',landmark:'#ff7aa8'};
+const CARD=['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+const norm360=a=>((a%360)+360)%360;
+const norm180=a=>{a=norm360(a);return a>180?a-360:a};
+const cardinal=b=>CARD[Math.round(norm360(b)/22.5)%16];
+const pad3=n=>String(Math.round(n)).padStart(3,'0');
+const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+
+function haversine(a1,o1,a2,o2){
+  const dLat=(a2-a1)*RAD,dLon=(o2-o1)*RAD;
+  const h=Math.sin(dLat/2)**2+Math.cos(a1*RAD)*Math.cos(a2*RAD)*Math.sin(dLon/2)**2;
+  return 2*R_EARTH*Math.asin(Math.min(1,Math.sqrt(h)));
+}
+function bearingTo(a1,o1,a2,o2){
+  const p1=a1*RAD,p2=a2*RAD,dl=(o2-o1)*RAD;
+  return norm360(Math.atan2(Math.sin(dl)*Math.cos(p2),Math.cos(p1)*Math.sin(p2)-Math.sin(p1)*Math.cos(p2)*Math.cos(dl))/RAD);
+}
+function destination(lat,lon,brg,d){
+  const dr=d/R_EARTH,b=brg*RAD,p1=lat*RAD,l1=lon*RAD;
+  const p2=Math.asin(Math.sin(p1)*Math.cos(dr)+Math.cos(p1)*Math.sin(dr)*Math.cos(b));
+  const l2=l1+Math.atan2(Math.sin(b)*Math.sin(dr)*Math.cos(p1),Math.cos(dr)-Math.sin(p1)*Math.sin(p2));
+  return [p2/RAD,((l2/RAD+540)%360)-180];
+}
+const fmtDist=d=>d<1000?Math.round(d)+' m':(d/1000).toFixed(d<100000?1:0)+' km';
+const fmtLat=v=>Math.abs(v).toFixed(5)+'° '+(v>=0?'N':'S');
+const fmtLon=v=>Math.abs(v).toFixed(5)+'° '+(v>=0?'E':'W');
+
+const S={
+  img:null,w:0,h:0,fileName:'photo',date:null,
+  lat:null,lon:null,posSrc:'',alt:null,altSrc:'',
+  heading:0,headingSrc:'none',fov:69,fovSrc:'',pitch:0,
+  feats:[],selected:null,pin:null,
+  radiusKm:30,maxKm:30,maxLabels:30,
+  layers:{peak:true,water:true,place:true,landmark:true},
+  opts:{horizon:true,ruler:true,inset:true,caption:true},
+  token:0
+};
+const cv=$('cv'),ctx=cv.getContext('2d');
+let placed=[],raf=0,objUrl=null,listKey='',mapKey='';
+
+/* ---------- status ---------- */
+function status(msg,err){const el=$('status');el.textContent=msg||'';el.classList.toggle('err',!!err)}
+
+/* ---------- photo loading ---------- */
+async function readMeta(file){
+  let meta={},gps=null;
+  try{meta=await exifr.parse(file,{tiff:true,ifd0:true,exif:true,gps:true,xmp:false,icc:false,iptc:false})||{}}catch(e){}
+  try{gps=await exifr.gps(file)}catch(e){}
+  return {meta,gps};
+}
+async function openFile(file){
+  if(!file)return;
+  status('Reading photo…');
+  const {meta,gps}=await readMeta(file);
+  if(objUrl)URL.revokeObjectURL(objUrl);
+  objUrl=URL.createObjectURL(file);
+  const img=new Image();img.src=objUrl;
+  try{await img.decode()}catch(e){
+    status('This browser cannot display that file. HEIC photos only open in Safari, so convert it to JPEG first.',true);return;
+  }
+  S.img=img;S.w=img.naturalWidth;S.h=img.naturalHeight;
+  S.fileName=(file.name||'photo').replace(/\.[^.]+$/,'');
+  const sc=Math.min(1,MAX_CANVAS/Math.max(S.w,S.h));
+  cv.width=Math.round(S.w*sc);cv.height=Math.round(S.h*sc);
+  S.date=meta.DateTimeOriginal instanceof Date?meta.DateTimeOriginal:null;
+  S.feats=[];S.selected=null;S.pin=null;S.pitch=0;
+  // field of view from the 35 mm equivalent focal length
+  const f35=Number(meta.FocalLengthIn35mmFormat);
+  if(f35>0){
+    const sensorW=43.27*S.w/Math.hypot(S.w,S.h);
+    S.fov=clamp(2*Math.atan(sensorW/(2*f35))/RAD,10,120);
+    S.fovSrc='from the photo ('+Math.round(f35)+' mm equivalent)';
+  }else{S.fov=69;S.fovSrc='estimated for a typical phone camera; adjust until the labels line up'}
+  // compass direction
+  const dir=Number(meta.GPSImgDirection);
+  if(meta.GPSImgDirection!=null&&Number.isFinite(dir)){
+    S.heading=norm360(dir);
+    S.headingSrc=/^m/i.test(String(meta.GPSImgDirectionRef||''))?'from the photo (magnetic north, may be a few degrees off)':'from the photo';
+  }else{S.heading=0;S.headingSrc='none'}
+  // altitude
+  S.alt=null;S.altSrc='';
+  if(Number.isFinite(Number(meta.GPSAltitude))&&meta.GPSAltitude!==null){
+    const below=meta.GPSAltitudeRef===1||/below/i.test(String(meta.GPSAltitudeRef||''));
+    S.alt=(below?-1:1)*Number(meta.GPSAltitude);S.altSrc='from the photo';
+  }
+  $('drop').hidden=true;$('canvasWrap').hidden=false;$('facts').hidden=false;
+  $('saveBtn').disabled=false;
+  syncControls();
+  const lat=Number((gps&&gps.latitude)??meta.latitude),lon=Number((gps&&gps.longitude)??meta.longitude);
+  if(Number.isFinite(lat)&&Number.isFinite(lon)&&(lat!==0||lon!==0)){
+    setLocation(lat,lon,'photo');
+  }else{
+    S.lat=S.lon=null;updateFacts();
+    status('No GPS position in this photo. Click the map, search for a place, or type coordinates.');
+    $('locHint').scrollIntoView?.({block:'nearest'});
+  }
+  setTimeout(()=>map&&map.invalidateSize(),50);
+  scheduleDraw();
+}
+
+/* ---------- location ---------- */
+function setLocation(lat,lon,src){
+  S.lat=lat;S.lon=lon;S.posSrc=src;S.feats=[];S.selected=null;listKey='';mapKey='';
+  $('latIn').value=lat.toFixed(5);$('lonIn').value=lon.toFixed(5);
+  if(src!=='photo'||S.alt==null){S.alt=null;S.altSrc='';}
+  placeCamera(src!=='drag');
+  updateFacts();syncControls();
+  $('findBtn').disabled=false;
+  if(S.alt==null)fetchCameraElevation();
+  clearTimeout(setLocation.t);
+  setLocation.t=setTimeout(findFeatures,src==='drag'?600:50);
+  scheduleDraw();
+}
+async function fetchCameraElevation(){
+  const tok=S.token;
+  try{
+    const el=await fetchElevations([{lat:S.lat,lon:S.lon}]);
+    if(tok!==S.token||S.alt!=null||!Number.isFinite(el[0]))return;
+    S.alt=el[0]+EYE_HEIGHT;S.altSrc='terrain model plus eye height';
+    syncControls();updateFacts();scheduleDraw();
+  }catch(e){}
+}
+async function fetchElevations(pts){
+  const url='https://api.open-meteo.com/v1/elevation?latitude='+pts.map(p=>p.lat.toFixed(5)).join(',')+'&longitude='+pts.map(p=>p.lon.toFixed(5)).join(',');
+  const r=await fetch(url);if(!r.ok)throw new Error('elevation '+r.status);
+  const j=await r.json();return j.elevation||[];
+}
+async function searchPlace(q){
+  status('Searching for “'+q+'”…');
+  try{
+    const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(q));
+    if(!r.ok)throw new Error(r.status);
+    const j=await r.json();
+    if(!j.length){status('No place found for “'+q+'”.',true);return}
+    setLocation(parseFloat(j[0].lat),parseFloat(j[0].lon),'search');
+    status('Moved to '+j[0].display_name);
+  }catch(e){status('Place search is unavailable right now. Click the map or type coordinates instead.',true)}
+}
+
+/* ---------- OpenStreetMap features ---------- */
+function buildQuery(lat,lon,r){
+  const a=`(around:${r},${lat},${lon})`;
+  return `[out:json][timeout:45];(
+node${a}["natural"~"^(peak|volcano|saddle|cape|glacier|hot_spring|bay)$"]["name"];
+node${a}["mountain_pass"="yes"]["name"];
+node${a}["place"~"^(city|town|village|hamlet|island|islet|sea|ocean)$"]["name"];
+node${a}["tourism"="viewpoint"]["name"];
+node${a}["man_made"="lighthouse"]["name"];
+node${a}["historic"="castle"]["name"];
+node${a}["waterway"="waterfall"]["name"];
+way${a}["natural"~"^(water|bay|glacier)$"]["name"];
+relation${a}["natural"~"^(water|bay|glacier)$"]["name"];
+way${a}["place"="island"]["name"];
+);out center tags 3000;`;
+}
+async function overpass(q){
+  const hosts=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter'];
+  let last;
+  for(const h of hosts){
+    try{
+      const r=await fetch(h,{method:'POST',body:'data='+encodeURIComponent(q),headers:{'Content-Type':'application/x-www-form-urlencoded'}});
+      if(!r.ok)throw new Error('HTTP '+r.status);
+      return await r.json();
+    }catch(e){last=e}
+  }
+  throw last;
+}
+function classify(t){
+  if(t.natural==='peak')return['peak','Peak'];
+  if(t.natural==='volcano')return['peak','Volcano'];
+  if(t.natural==='saddle'||t.mountain_pass==='yes')return['peak','Pass'];
+  if(t.natural==='glacier')return['water','Glacier'];
+  if(t.natural==='water'){
+    if(['river','stream','canal','ditch','drain'].includes(t.water))return null;
+    return['water',t.water==='reservoir'?'Reservoir':'Lake'];
+  }
+  if(t.natural==='bay')return['water','Bay'];
+  if(t.place==='sea'||t.place==='ocean')return['water','Sea'];
+  if(['city','town','village','hamlet'].includes(t.place))return['place',t.place[0].toUpperCase()+t.place.slice(1)];
+  if(t.place==='island'||t.place==='islet')return['landmark','Island'];
+  if(t.natural==='cape')return['landmark','Cape'];
+  if(t.natural==='hot_spring')return['landmark','Hot spring'];
+  if(t.tourism==='viewpoint')return['landmark','Viewpoint'];
+  if(t.man_made==='lighthouse')return['landmark','Lighthouse'];
+  if(t.historic==='castle')return['landmark','Castle'];
+  if(t.waterway==='waterfall')return['landmark','Waterfall'];
+  return null;
+}
+async function findFeatures(){
+  if(S.lat==null)return;
+  const tok=++S.token;
+  S.radiusKm=+$('radius').value;
+  status('Looking up features within '+S.radiusKm+' km…');
+  try{
+    const data=await overpass(buildQuery(S.lat,S.lon,S.radiusKm*1000));
+    if(tok!==S.token)return;
+    const seen=new Set(),out=[];let id=0;
+    for(const el of data.elements||[]){
+      const t=el.tags||{};if(!t.name)continue;
+      const c=classify(t);if(!c)continue;
+      const lat=el.lat??(el.center&&el.center.lat),lon=el.lon??(el.center&&el.center.lon);
+      if(!Number.isFinite(lat)||!Number.isFinite(lon))continue;
+      const key=t.name.toLowerCase()+'|'+c[1]+'|'+lat.toFixed(2)+','+lon.toFixed(2);
+      if(seen.has(key))continue;seen.add(key);
+      const ele=parseFloat(String(t.ele||'').replace(',','.'));
+      const f={id:id++,name:t.name,cat:c[0],sub:c[1],lat,lon,
+        ele:Number.isFinite(ele)?ele:null,eleSrc:Number.isFinite(ele)?'osm':'',eleTried:false};
+      f.dist=haversine(S.lat,S.lon,lat,lon);f.bearing=bearingTo(S.lat,S.lon,lat,lon);
+      if(f.dist>=50)out.push(f);
+    }
+    S.feats=out;listKey='';mapKey='';
+    status(out.length?'Found '+out.length+' named features. Turn the view or change what is shown to explore them.':'No named features found nearby. Try a larger search radius.');
+    scheduleDraw();queueElev();
+  }catch(e){
+    if(tok!==S.token)return;
+    status('Could not reach OpenStreetMap ('+(e&&e.message?e.message:'network error')+'). Check your connection and press Search again.',true);
+  }
+}
+let elevTimer=0,elevBusy=false;
+function queueElev(){clearTimeout(elevTimer);elevTimer=setTimeout(runElev,500)}
+async function runElev(){
+  if(!S.feats.length||S.lat==null||elevBusy)return;
+  const half=S.fov/2+8,maxD=S.maxKm*1000;
+  const need=S.feats.filter(f=>f.ele==null&&!f.eleTried&&S.layers[f.cat]&&f.dist<=maxD&&Math.abs(norm180(f.bearing-S.heading))<=half);
+  if(!need.length)return;
+  need.sort((a,b)=>baseScore(b)-baseScore(a));
+  const batch=need.slice(0,100);batch.forEach(f=>f.eleTried=true);
+  elevBusy=true;
+  try{
+    const el=await fetchElevations(batch);
+    batch.forEach((f,i)=>{if(Number.isFinite(el[i])){f.ele=el[i];f.eleSrc='dem'}});
+  }catch(e){}
+  elevBusy=false;scheduleDraw();
+  if(need.length>100)queueElev();
+}
+
+/* ---------- projection ---------- */
+function viewObj(){
+  const W=cv.width,H=cv.height;
+  return{W,H,fpx:(W/2)/Math.tan(S.fov*RAD/2),cx:W/2,cy:H/2,p:S.pitch*RAD};
+}
+function projectF(f,V){
+  const camE=S.alt??0;
+  const dz=(f.ele??camE)-camE;
+  const drop=f.dist*f.dist*(1-REFRACTION)/(2*R_EARTH);
+  const e=Math.atan2(dz-drop,f.dist);
+  const d=(f.bearing-S.heading)*RAD;
+  const ce=Math.cos(e),se=Math.sin(e),cp=Math.cos(V.p),sp=Math.sin(V.p);
+  const yc=Math.cos(d)*ce*cp+se*sp;
+  if(yc<=0.02)return null;
+  const xc=Math.sin(d)*ce,zc=-Math.cos(d)*ce*sp+se*cp;
+  return{x:V.cx+V.fpx*xc/yc,y:V.cy-V.fpx*zc/yc,e};
+}
+function baseScore(f){
+  let s={peak:2,water:1.4,place:1.2,landmark:1}[f.cat];
+  if(f.cat==='peak')s+=Math.min(3,(f.ele||0)/1500);
+  if(f.cat==='place')s+={City:3,Town:2,Village:1,Hamlet:.4}[f.sub]||0;
+  if(f.cat==='water')s+=f.sub==='Sea'?2:.5;
+  return s-f.dist/1e5*2;
+}
+const score=(f,e)=>baseScore(f)+clamp(e*20,0,2);
+function subText(f){
+  const d=fmtDist(f.dist);
+  if(f.cat==='peak'&&f.ele!=null)return(f.eleSrc==='dem'?'~':'')+Math.round(f.ele).toLocaleString('en')+' m · '+d;
+  return f.sub+' · '+d;
+}
+
+/* ---------- drawing ---------- */
+function scheduleDraw(){if(!raf)raf=requestAnimationFrame(()=>{raf=0;draw()})}
+function rrect(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath()}
+function marker(c,cat,x,y,r,sel,u){
+  c.save();c.lineWidth=1.5*u;c.strokeStyle='rgba(6,16,22,.9)';c.fillStyle=CAT[cat];
+  c.beginPath();
+  if(cat==='peak'){c.moveTo(x,y-r*1.2);c.lineTo(x+r*1.1,y+r*.8);c.lineTo(x-r*1.1,y+r*.8);c.closePath()}
+  else if(cat==='water'){c.arc(x,y,r,0,7)}
+  else if(cat==='place'){c.rect(x-r*.85,y-r*.85,r*1.7,r*1.7)}
+  else{c.moveTo(x,y-r*1.2);c.lineTo(x+r*1.2,y);c.lineTo(x,y+r*1.2);c.lineTo(x-r*1.2,y);c.closePath()}
+  c.fill();c.stroke();
+  if(sel){c.beginPath();c.arc(x,y,r*2.2,0,7);c.strokeStyle='#fff';c.lineWidth=2*u;c.stroke()}
+  c.restore();
+}
+function draw(exporting){
+  if(!S.img)return;
+  const V=viewObj(),{W,H}=V;
+  const cssW=exporting===true?1100:Math.max(cv.clientWidth||900,200);
+  const u=W/cssW,ui=Math.min(1,cssW/760);
+  ctx.clearRect(0,0,W,H);
+  ctx.drawImage(S.img,0,0,W,H);
+  let g=ctx.createLinearGradient(0,0,0,110*u);
+  g.addColorStop(0,'rgba(5,12,18,.5)');g.addColorStop(1,'rgba(5,12,18,0)');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,110*u);
+  const rulerH=S.opts.ruler?34*u:0;
+  if(S.opts.ruler){
+    g=ctx.createLinearGradient(0,H-rulerH-26*u,0,H);
+    g.addColorStop(0,'rgba(5,12,18,0)');g.addColorStop(.45,'rgba(5,12,18,.6)');g.addColorStop(1,'rgba(5,12,18,.82)');
+    ctx.fillStyle=g;ctx.fillRect(0,H-rulerH-26*u,W,rulerH+26*u);
+  }
+  const obstacles=[],newPlaced=[];
+  if(S.lat==null){
+    ctx.fillStyle='rgba(6,16,22,.7)';ctx.fillRect(0,H/2-24*u,W,48*u);
+    ctx.fillStyle='#fff';ctx.font=`700 ${15*u}px ${FONT_UI}`;ctx.textAlign='center';
+    ctx.fillText('Set where this photo was taken to see labels',W/2,H/2+5*u);ctx.textAlign='left';
+    placed=[];return;
+  }
+  ctx.textAlign='left';
+  // caption
+  if(S.opts.caption){
+    const f1=Math.max(9,11*Math.max(ui,.8))*u;
+    const l1=fmtLat(S.lat)+'   '+fmtLon(S.lon);
+    const l2=(S.alt!=null?Math.round(S.alt).toLocaleString('en')+' m':'— m')+' · facing '+pad3(S.heading)+'° '+cardinal(S.heading)+' · FOV '+Math.round(S.fov)+'°';
+    ctx.font=`500 ${f1}px ${FONT_MONO}`;
+    const w=Math.max(ctx.measureText(l1).width,ctx.measureText(l2).width)+16*u,h=f1*2+16*u;
+    ctx.fillStyle='rgba(6,16,22,.7)';rrect(ctx,10*u,10*u,w,h,4*u);ctx.fill();
+    ctx.fillStyle='#fff';ctx.fillText(l1,18*u,10*u+8*u+f1*.85);
+    ctx.fillStyle='rgba(255,255,255,.75)';ctx.fillText(l2,18*u,10*u+8*u+f1*2.05);
+    obstacles.push({x:10*u,y:10*u,w,h});
+  }
+  // inset
+  if(S.opts.inset){
+    const r=(cssW<520?38:54)*u,cx=W-10*u-r,cy=10*u+r;
+    ctx.fillStyle='rgba(6,16,22,.7)';ctx.beginPath();ctx.arc(cx,cy,r+4*u,0,7);ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,.35)';ctx.lineWidth=1*u;
+    ctx.beginPath();ctx.arc(cx,cy,r,0,7);ctx.stroke();
+    ctx.beginPath();ctx.arc(cx,cy,r/2,0,7);ctx.stroke();
+    const a0=(S.heading-S.fov/2)*RAD,a1=(S.heading+S.fov/2)*RAD;
+    ctx.fillStyle='rgba(76,195,230,.38)';ctx.beginPath();ctx.moveTo(cx,cy);
+    for(let i=0;i<=24;i++){const a=a0+(a1-a0)*i/24;ctx.lineTo(cx+Math.sin(a)*r,cy-Math.cos(a)*r)}
+    ctx.closePath();ctx.fill();
+    const maxD=S.maxKm*1000;
+    for(const f of S.feats){
+      if(!S.layers[f.cat]||f.dist>maxD)continue;
+      const rr=f.dist/maxD*r,a=f.bearing*RAD;
+      ctx.fillStyle=CAT[f.cat];ctx.globalAlpha=f===S.selected?1:.8;
+      ctx.beginPath();ctx.arc(cx+Math.sin(a)*rr,cy-Math.cos(a)*rr,(f===S.selected?3.2:1.7)*u,0,7);ctx.fill();
+    }
+    ctx.globalAlpha=1;
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(cx,cy,2.6*u,0,7);ctx.fill();
+    ctx.font=`600 ${9*u}px ${FONT_MONO}`;ctx.textAlign='center';
+    ctx.fillText('N',cx,cy-r-6*u+4*u*0);
+    ctx.fillStyle='rgba(255,255,255,.7)';ctx.fillText(S.maxKm+' km',cx,cy+r+14*u);ctx.textAlign='left';
+    obstacles.push({x:cx-r-4*u,y:cy-r-12*u,w:2*r+8*u,h:2*r+28*u});
+  }
+  // candidates
+  const maxD=S.maxKm*1000,cand=[];
+  for(const f of S.feats){
+    if(!S.layers[f.cat]||f.dist>maxD||f.dist<80)continue;
+    const p=projectF(f,V);if(!p)continue;
+    if(p.x<-4*u||p.x>W+4*u||p.y<4*u||p.y>H-rulerH-6*u)continue;
+    f._p=p;f._score=score(f,p.e);cand.push(f);
+  }
+  cand.sort((a,b)=>b._score-a._score);
+  const fs=12*u,fs2=10.5*u,gap=3*u;
+  const hit=(x,y,w,h)=>{
+    for(const o of obstacles)if(x<o.x+o.w+gap&&x+w>o.x-gap&&y<o.y+o.h+gap&&y+h>o.y-gap)return true;
+    for(const o of newPlaced)if(x<o.x+o.w+gap&&x+w>o.x-gap&&y<o.y+o.h+gap&&y+h>o.y-gap)return true;
+    return false;
+  };
+  if(S.selected&&!cand.includes(S.selected)){/* selected feature may be out of view */}
+  for(const f of cand){
+    if(newPlaced.length>=S.maxLabels)break;
+    const sub=subText(f);
+    ctx.font=`700 ${fs}px ${FONT_UI}`;const w1=ctx.measureText(f.name).width;
+    ctx.font=`500 ${fs2}px ${FONT_MONO}`;const w2=ctx.measureText(sub).width;
+    const w=Math.max(w1,w2)+16*u,h=fs+fs2+10*u;
+    const x=clamp(f._p.x-w/2,6*u,W-w-6*u),ay=f._p.y;
+    let y=null;
+    for(let t=0;t<40;t++){const yy=ay-20*u-h-t*(h+gap);if(yy<6*u)break;if(!hit(x,yy,w,h)){y=yy;break}}
+    if(y==null)for(let t=0;t<40;t++){const yy=ay+16*u+t*(h+gap);if(yy+h>H-rulerH-4*u)break;if(!hit(x,yy,w,h)){y=yy;break}}
+    if(y==null)continue;
+    newPlaced.push({f,x,y,w,h,ax:f._p.x,ay,sub});
+  }
+  // leaders and markers
+  ctx.lineWidth=1*u;
+  for(const o of newPlaced){
+    const lx=clamp(o.ax,o.x+8*u,o.x+o.w-8*u),ly=o.y>o.ay?o.y:o.y+o.h;
+    ctx.strokeStyle='rgba(255,255,255,.7)';ctx.beginPath();ctx.moveTo(o.ax,o.ay);ctx.lineTo(lx,ly);ctx.stroke();
+  }
+  for(const o of newPlaced)marker(ctx,o.f.cat,o.ax,o.ay,4.2*u,o.f===S.selected,u);
+  for(const o of newPlaced){
+    const sel=o.f===S.selected;
+    ctx.fillStyle='rgba(6,16,22,.78)';rrect(ctx,o.x,o.y,o.w,o.h,3*u);ctx.fill();
+    if(sel){ctx.strokeStyle='#fff';ctx.lineWidth=1.5*u;ctx.stroke()}
+    ctx.fillStyle=CAT[o.f.cat];ctx.fillRect(o.x,o.y+2*u,3*u,o.h-4*u);
+    ctx.fillStyle='#fff';ctx.font=`700 ${fs}px ${FONT_UI}`;ctx.fillText(o.f.name,o.x+9*u,o.y+5*u+fs*.85);
+    ctx.fillStyle='rgba(255,255,255,.72)';ctx.font=`500 ${fs2}px ${FONT_MONO}`;ctx.fillText(o.sub,o.x+9*u,o.y+7*u+fs+fs2*.85);
+  }
+  // eye-level line
+  if(S.opts.horizon){
+    const y=V.cy+V.fpx*Math.tan(V.p);
+    if(y>0&&y<H-rulerH){
+      ctx.save();ctx.setLineDash([8*u,6*u]);ctx.strokeStyle='rgba(255,255,255,.45)';ctx.lineWidth=1*u;
+      ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();ctx.restore();
+      ctx.fillStyle='rgba(255,255,255,.65)';ctx.font=`500 ${9*u}px ${FONT_MONO}`;
+      ctx.fillText('eye level',W-62*u,y-4*u);
+    }
+  }
+  // bearing scale
+  if(S.opts.ruler){
+    const fov=S.fov,steps=fov>90?[30,10]:fov>40?[10,5]:fov>15?[5,1]:[1,.5];
+    const [major,minor]=steps,half=Math.min(fov/2*1.2+2,85),yb=H-6*u;
+    const k0=Math.ceil((S.heading-half)/minor),k1=Math.floor((S.heading+half)/minor);
+    ctx.strokeStyle='rgba(255,255,255,.85)';ctx.textAlign='center';
+    for(let k=k0;k<=k1;k++){
+      const az=k*minor,x=V.cx+V.fpx*Math.tan((az-S.heading)*RAD)/Math.cos(V.p);
+      if(x<0||x>W)continue;
+      const isMajor=Math.abs(az/major-Math.round(az/major))<1e-6,len=(isMajor?11:5.5)*u;
+      ctx.lineWidth=1*u;ctx.beginPath();ctx.moveTo(x,yb);ctx.lineTo(x,yb-len);ctx.stroke();
+      if(isMajor&&x>20*u&&x<W-20*u){
+        const a=norm360(az),card=Math.abs(a/45-Math.round(a/45))<1e-6;
+        ctx.font=`${card?700:500} ${10.5*u}px ${FONT_MONO}`;
+        ctx.fillStyle=card?'#ffb21a':'rgba(255,255,255,.9)';
+        ctx.fillText(card?CARD[Math.round(a/22.5)%16]+' '+pad3(a)+'°':pad3(a)+'°',x,yb-len-4*u);
+      }
+    }
+    ctx.textAlign='left';
+    ctx.fillStyle='#4cc3e6';ctx.beginPath();ctx.moveTo(V.cx,yb+1*u);ctx.lineTo(V.cx-4*u,yb+6*u);ctx.lineTo(V.cx+4*u,yb+6*u);ctx.closePath();ctx.fill();
+  }
+  if(exporting!==true){placed=newPlaced;afterDraw()}
+}
+
+/* ---------- side effects of a draw: list, map, facts ---------- */
+function afterDraw(){
+  const key=placed.map(o=>o.f.id).join(',')+'|'+(S.selected?S.selected.id:'');
+  if(key!==listKey){listKey=key;renderList()}
+  syncMap();
+}
+function renderList(){
+  const ol=$('list');ol.textContent='';
+  const items=placed.slice().sort((a,b)=>a.ax-b.ax);
+  $('listTitle').textContent=items.length?'In view ('+items.length+')':'In view';
+  $('listEmpty').hidden=items.length>0;
+  if(!items.length)$('listEmpty').textContent=S.img?(S.feats.length?'Nothing to label at this heading. Turn the view, or raise the distance limit.':'Features appear here once the search finishes.'):'Open a photo to see what is in view, left to right.';
+  for(const o of items){
+    const li=document.createElement('li'),b=document.createElement('button');
+    b.type='button';if(o.f===S.selected)b.setAttribute('aria-current','true');
+    const dot=document.createElement('span');dot.className='dot '+o.f.cat;
+    const t=document.createElement('span'),n=document.createElement('strong'),m=document.createElement('small');
+    n.textContent=o.f.name;m.textContent=o.sub+' · '+pad3(o.f.bearing)+'° '+cardinal(o.f.bearing);
+    t.append(n,m);b.append(dot,t);li.append(b);ol.append(li);
+    b.addEventListener('click',()=>select(o.f));
+  }
+}
+function updateFacts(){
+  $('fPos').textContent=S.lat==null?'—':fmtLat(S.lat)+'\n'+fmtLon(S.lon);
+  $('fPos').style.whiteSpace='pre-line';
+  $('fPosSrc').textContent=S.lat==null?'':({photo:'from the photo',map:'set on the map',search:'from place search',drag:'pin moved by hand',typed:'typed in'}[S.posSrc]||'');
+  $('fAlt').textContent=S.alt==null?'—':Math.round(S.alt).toLocaleString('en')+' m';
+  $('fAltSrc').textContent=S.alt==null?(S.lat==null?'':'looking up…'):S.altSrc;
+  $('fHdg').textContent=pad3(S.heading)+'° '+cardinal(S.heading);
+  $('fHdgSrc').textContent=S.headingSrc==='none'?'not in photo':S.headingSrc;
+  $('fFov').textContent=Math.round(S.fov)+'°';
+  $('fFovSrc').textContent=S.fovSrc.startsWith('from')?S.fovSrc.replace(/ \(.*\)/,''):'estimated';
+  $('fDate').textContent=S.date?S.date.toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'}):'not in photo';
+}
+function syncControls(){
+  $('hdg').value=S.heading;$('hdgOut').textContent=pad3(S.heading)+'° '+cardinal(S.heading);
+  $('hdgSrc').textContent=S.headingSrc==='none'?'No compass reading in this photo. Drag the image sideways, or select a label and use Pin to photo.':S.headingSrc.charAt(0).toUpperCase()+S.headingSrc.slice(1);
+  $('fov').value=S.fov;$('fovOut').textContent=Math.round(S.fov)+'°';
+  $('fovSrc').textContent=S.fovSrc?S.fovSrc.charAt(0).toUpperCase()+S.fovSrc.slice(1):'';
+  $('tilt').value=S.pitch;$('tiltOut').textContent=S.pitch.toFixed(1)+'°';
+  if(document.activeElement!==$('altIn'))$('altIn').value=S.alt==null?'':Math.round(S.alt);
+  updateFacts();
+}
+function setHeading(h,src){
+  S.heading=norm360(h);if(src)S.headingSrc=src;
+  syncControls();scheduleDraw();queueElev();
+}
+
+/* ---------- selection and pinning ---------- */
+function select(f){
+  S.selected=f;S.pin=null;updatePin();listKey='';
+  const bar=$('selbar');bar.hidden=!f;
+  if(f){
+    $('selName').textContent=f.name;
+    $('selMeta').textContent=[f.sub,f.ele!=null?(f.eleSrc==='dem'?'~':'')+Math.round(f.ele).toLocaleString('en')+' m':null,fmtDist(f.dist)+' away','bearing '+pad3(f.bearing)+'° '+cardinal(f.bearing)].filter(Boolean).join(' · ');
+  }
+  scheduleDraw();
+}
+function updatePin(){
+  const on=!!S.pin;$('pinHint').hidden=!on;cv.classList.toggle('pinning',on);
+  if(on)$('pinHint').textContent='Click where “'+S.pin.name+'” appears in the photo';
+}
+function alignTo(f,px,py){
+  for(let i=0;i<16;i++){
+    const V=viewObj(),p=projectF(f,V);
+    if(!p){S.heading=f.bearing;continue}
+    S.heading=norm360(S.heading-(px-p.x)/V.fpx/RAD*.9);
+    S.pitch=clamp(S.pitch+(py-p.y)/V.fpx/RAD*.9,-30,30);
+  }
+  S.headingSrc='aligned to “'+f.name+'”';
+  syncControls();scheduleDraw();queueElev();
+}
+function canvasXY(e){
+  const r=cv.getBoundingClientRect();
+  return[(e.clientX-r.left)*cv.width/r.width,(e.clientY-r.top)*cv.height/r.height];
+}
+function onClick(e){
+  const [x,y]=canvasXY(e);
+  if(S.pin){const f=S.pin;S.pin=null;updatePin();alignTo(f,x,y);return}
+  const u=cv.width/Math.max(cv.clientWidth,200);
+  for(let i=placed.length-1;i>=0;i--){
+    const o=placed[i];
+    if((x>=o.x&&x<=o.x+o.w&&y>=o.y&&y<=o.y+o.h)||Math.hypot(x-o.ax,y-o.ay)<10*u){select(o.f);return}
+  }
+  if(S.selected)select(null);
+}
+
+/* ---------- map ---------- */
+let map,camMarker,wedge,featLayer,selLine;
+function initMap(){
+  map=L.map('map').setView([46.8,8.2],4);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:18,attribution:'&copy; OpenStreetMap contributors'}).addTo(map);
+  featLayer=L.layerGroup().addTo(map);
+  map.on('click',e=>{if(S.lat==null&&S.img)setLocation(e.latlng.lat,e.latlng.lng,'map')});
+}
+function placeCamera(fit){
+  if(!map)return;
+  const ll=[S.lat,S.lon];
+  if(!camMarker){
+    camMarker=L.marker(ll,{draggable:true,title:'Camera position',icon:L.divIcon({className:'cam-pin',html:'<span></span>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map);
+    camMarker.on('dragend',()=>{const p=camMarker.getLatLng();setLocation(p.lat,p.lng,'drag')});
+  }else camMarker.setLatLng(ll);
+  if(fit)map.fitBounds(L.latLng(ll).toBounds(Math.max(S.radiusKm,5)*2200),{animate:false});
+}
+function syncMap(){
+  if(!map||S.lat==null||!camMarker)return;
+  const r=Math.min(S.maxKm,S.radiusKm)*1000,ll=[S.lat,S.lon],pts=[ll];
+  for(let i=0;i<=20;i++)pts.push(destination(S.lat,S.lon,S.heading-S.fov/2+S.fov*i/20,r));
+  if(!wedge)wedge=L.polygon(pts,{color:'#0b6c8c',weight:1.5,fillColor:'#4cc3e6',fillOpacity:.25,interactive:false}).addTo(map);
+  else wedge.setLatLngs(pts);
+  const key=placed.map(o=>o.f.id).join(',')+'|'+(S.selected?S.selected.id:'');
+  if(key===mapKey)return;mapKey=key;
+  featLayer.clearLayers();
+  for(const o of placed){
+    const f=o.f,sel=f===S.selected;
+    const m=L.circleMarker([f.lat,f.lon],{radius:sel?7:4.5,color:'#06222c',weight:1.5,fillColor:CAT[f.cat],fillOpacity:1});
+    const tip=document.createElement('span');tip.textContent=f.name;m.bindTooltip(tip);
+    m.on('click',()=>select(f));featLayer.addLayer(m);
+  }
+  if(S.selected)featLayer.addLayer(L.polyline([ll,[S.selected.lat,S.selected.lon]],{color:'#fff',weight:2,dashArray:'4 4',interactive:false}));
+}
+
+/* ---------- export ---------- */
+function save(){
+  if(!S.img)return;
+  draw(true);
+  cv.toBlob(b=>{
+    if(!b)return;
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=S.fileName+'-sightline.png';
+    document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+  },'image/png');
+  scheduleDraw();
+}
+
+/* ---------- events ---------- */
+const fileIn=$('file');
+$('openBtn').onclick=$('dropBtn').onclick=()=>fileIn.click();
+fileIn.onchange=()=>{openFile(fileIn.files[0]);fileIn.value=''};
+$('saveBtn').onclick=save;
+const stage=$('stage');
+['dragenter','dragover'].forEach(t=>stage.addEventListener(t,e=>{e.preventDefault();$('drop').classList.add('over')}));
+['dragleave','drop'].forEach(t=>stage.addEventListener(t,e=>{e.preventDefault();$('drop').classList.remove('over')}));
+stage.addEventListener('drop',e=>{const f=e.dataTransfer&&e.dataTransfer.files[0];if(f)openFile(f)});
+
+let drag=null;
+cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);drag={x:e.clientX,h:S.heading,moved:false}});
+cv.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  const dx=e.clientX-drag.x;
+  if(Math.abs(dx)>4)drag.moved=true;
+  if(drag.moved&&!S.pin){
+    const r=cv.getBoundingClientRect();
+    setHeading(drag.h-dx*S.fov/r.width,'adjusted by hand');
+  }
+});
+cv.addEventListener('pointerup',e=>{if(drag&&!drag.moved)onClick(e);drag=null});
+cv.addEventListener('pointercancel',()=>{drag=null});
+cv.addEventListener('keydown',e=>{
+  const step=e.shiftKey?5:1;
+  if(e.key==='ArrowLeft'){setHeading(S.heading-step,'adjusted by hand');e.preventDefault()}
+  if(e.key==='ArrowRight'){setHeading(S.heading+step,'adjusted by hand');e.preventDefault()}
+});
+new ResizeObserver(()=>scheduleDraw()).observe(cv);
+
+$('hdg').oninput=e=>setHeading(+e.target.value,'set with the slider');
+$('fov').oninput=e=>{S.fov=+e.target.value;S.fovSrc='set with the slider';syncControls();scheduleDraw();queueElev()};
+$('tilt').oninput=e=>{S.pitch=+e.target.value;syncControls();scheduleDraw()};
+$('altIn').onchange=e=>{const v=parseFloat(e.target.value);S.alt=Number.isFinite(v)?v:null;S.altSrc=Number.isFinite(v)?'entered by hand':'';updateFacts();scheduleDraw();if(S.alt==null&&S.lat!=null)fetchCameraElevation()};
+$('radius').oninput=e=>{$('radiusOut').textContent=e.target.value+' km'};
+$('radius').onchange=()=>{S.radiusKm=+$('radius').value;if($('maxkm').value>S.radiusKm){$('maxkm').value=S.radiusKm;S.maxKm=S.radiusKm;$('maxkmOut').textContent=S.maxKm+' km'}findFeatures()};
+$('maxkm').oninput=e=>{S.maxKm=+e.target.value;$('maxkmOut').textContent=S.maxKm+' km';scheduleDraw();queueElev()};
+$('maxlab').oninput=e=>{S.maxLabels=+e.target.value;$('maxlabOut').textContent=S.maxLabels;scheduleDraw()};
+$('findBtn').onclick=findFeatures;
+document.querySelectorAll('[data-layer]').forEach(c=>c.onchange=()=>{S.layers[c.dataset.layer]=c.checked;scheduleDraw();queueElev()});
+document.querySelectorAll('[data-opt]').forEach(c=>c.onchange=()=>{S.opts[c.dataset.opt]=c.checked;scheduleDraw()});
+$('pinBtn').onclick=()=>{if(S.selected){S.pin=S.selected;updatePin();cv.scrollIntoView({block:'nearest',behavior:'smooth'})}};
+$('selClear').onclick=()=>select(null);
+$('searchForm').onsubmit=e=>{e.preventDefault();const q=$('q').value.trim();if(q)searchPlace(q)};
+function typedLocation(){
+  const la=parseFloat($('latIn').value),lo=parseFloat($('lonIn').value);
+  if(Number.isFinite(la)&&Number.isFinite(lo)&&Math.abs(la)<=90&&Math.abs(lo)<=180)setLocation(la,lo,'typed');
+}
+$('latIn').onchange=$('lonIn').onchange=typedLocation;
+
+initMap();
+if(document.fonts&&document.fonts.ready)document.fonts.ready.then(scheduleDraw);
+})();
+</script>
+</body>
+</html>
