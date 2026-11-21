@@ -396,33 +396,28 @@ async function searchPlace(q){
 
 /* ---------- OpenStreetMap features ---------- */
 function stageQueries(lat,lon,r){
-  const ar=`(around:${r},${lat},${lon})`;
-  // Tag filters come first so the server uses its tag index, then narrows by distance.
-  const nodes=(key,vals,extra='')=>vals.map(v=>`node["${key}"="${v}"]["name"]${extra}${ar};`).join('\n');
-  const wrap=(body,limit)=>`[out:json][timeout:25];(\n${body}\n);out center tags ${limit};`;
   const notRiver='["water"!~"^(river|stream|canal|ditch|drain)$"]';
-  return [
-    {label:'places and peaks',q:wrap([
-      nodes('natural',['peak','volcano','saddle']),
-      nodes('mountain_pass',['yes']),
-      nodes('place',['city','town','village','hamlet','suburb','island','islet','sea','ocean'])
-    ].join('\n'),2500)},
-    {label:'lakes, bays and glaciers',q:wrap([
-      nodes('natural',['bay','glacier']),
-      `way["natural"="water"]["name"]${notRiver}${ar};`,
-      `relation["natural"="water"]["name"]${notRiver}${ar};`,
-      `way["natural"="bay"]["name"]${ar};`,
-      `way["natural"="glacier"]["name"]${ar};`,
-      `way["place"="island"]["name"]${ar};`
-    ].join('\n'),800)},
-    {label:'viewpoints and landmarks',q:wrap([
-      nodes('natural',['cape','hot_spring']),
-      nodes('tourism',['viewpoint']),
-      nodes('man_made',['lighthouse']),
-      nodes('historic',['castle']),
-      nodes('waterway',['waterfall'])
-    ].join('\n'),800)}
-  ];
+  const wrap=(body,limit)=>`[out:json][timeout:25];(\n${body}\n);out center tags ${limit};`;
+  // Tag filters come first so the server uses its tag index, then narrows by distance.
+  const parts=ar=>{
+    const nodes=(key,vals)=>vals.map(v=>`node["${key}"="${v}"]["name"]${ar};`).join('\n');
+    return [
+      [nodes('natural',['peak','volcano','saddle']),nodes('mountain_pass',['yes']),
+       nodes('place',['city','town','village','hamlet','suburb','island','islet','sea','ocean'])].join('\n'),
+      [nodes('natural',['bay','glacier']),
+       `way["natural"="water"]["name"]${notRiver}${ar};`,
+       `relation["natural"="water"]["name"]${notRiver}${ar};`,
+       `way["natural"="bay"]["name"]${ar};`,`way["natural"="glacier"]["name"]${ar};`,
+       `way["place"="island"]["name"]${ar};`].join('\n'),
+      [nodes('natural',['cape','hot_spring']),nodes('tourism',['viewpoint']),nodes('man_made',['lighthouse']),
+       nodes('historic',['castle']),nodes('waterway',['waterfall'])].join('\n')
+    ];
+  };
+  const labels=['places and peaks','lakes, bays and glaciers','viewpoints and landmarks'],limits=[2500,800,800];
+  const full=parts(`(around:${r},${lat},${lon})`).map((body,i)=>({label:labels[i],ms:28000,q:wrap(body,limits[i])}));
+  if(r<=5000)return full;
+  const near=parts(`(around:5000,${lat},${lon})`).join('\n');
+  return [{label:'everything within 5 km',ms:15000,q:wrap(near,1500)},...full];
 }
 async function overpassOnce(host,q,ms){
   const ac=new AbortController(),to=setTimeout(()=>ac.abort(),ms);
@@ -435,11 +430,11 @@ async function overpassOnce(host,q,ms){
     return j;
   }finally{clearTimeout(to)}
 }
-async function overpass(q){
+async function overpass(q,ms){
   const hosts=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter'];
   let last;
   for(const h of hosts){
-    try{return await overpassOnce(h,q,28000)}
+    try{return await overpassOnce(h,q,ms||28000)}
     catch(e){last=e.name==='AbortError'?new Error('no answer in time'):e}
   }
   throw last;
@@ -508,17 +503,18 @@ async function findFeatures(){
     }
     return n;
   };
-  const failed=[];
+  const failed=[];let aborted=false;
   for(let i=0;i<stages.length;i++){
     progStage(i,'looking up '+stages[i].label);
     try{
-      const data=await overpass(stages[i].q);
+      const data=await overpass(stages[i].q,stages[i].ms);
       if(tok!==S.token)return;
       ingest(data.elements||[]);
       listKey='';mapKey='';scheduleDraw();
     }catch(e){
       if(tok!==S.token)return;
       failed.push(stages[i].label+' ('+(e&&e.message?e.message:'network error')+')');
+      if(i===0&&!S.feats.length){aborted=true;break}
     }
   }
   if(tok!==S.token)return;
@@ -531,9 +527,9 @@ async function findFeatures(){
   if(n){
     progEnd(tok,'Done: '+n+' named features');
     status('Found '+n+' named features.'+(failed.length?' Could not load: '+failed.join('; ')+'. Press Search again to retry.':' Turn the view or change what is shown to explore them.'),failed.length>0);
-  }else if(failed.length===stages.length){
+  }else if(aborted||failed.length===stages.length){
     progEnd(tok,'Search failed');
-    status('OpenStreetMap did not answer: '+failed[0]+'. Check your connection, try a smaller search radius, then press Search again.',true);
+    status('OpenStreetMap did not answer: '+failed[0]+'. Its public servers may be busy. Check your connection and press Search again in a minute.',true);
   }else{
     progEnd(tok,'Search finished');
     status(failed.length?'Some lookups failed ('+failed.join('; ')+') and nothing was found by the others. Press Search again.':'No named features within '+S.radiusKm+' km. Try a larger search radius.',failed.length>0);
