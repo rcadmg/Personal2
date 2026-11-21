@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Sightline Live</title>
+<style>
+html,body{margin:0;height:100%;background:#000;color:#fff;font:14px -apple-system,system-ui,sans-serif;overflow:hidden}
+#vid,#ov{position:fixed;inset:0;width:100%;height:100%}
+#vid{object-fit:cover}
+#start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#0b1620;padding:24px;text-align:center}
+#start button,.b{font:600 16px system-ui;padding:12px 20px;border-radius:12px;border:0;background:#3aa0ff;color:#fff}
+#hud{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 6px) 10px 6px;background:linear-gradient(#000a,#0000);font-size:12px;display:flex;justify-content:space-between;gap:8px;pointer-events:none}
+#bar{position:fixed;left:0;right:0;bottom:0;padding:8px 10px calc(env(safe-area-inset-bottom,0px) + 8px);background:linear-gradient(#0000,#000b);display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+#bar .b{font-size:13px;padding:8px 12px;background:#ffffff26}
+#bar label{font-size:12px;display:flex;gap:6px;align-items:center}
+#log{position:fixed;left:10px;right:10px;top:70px;font-size:11px;color:#ffd27a;white-space:pre-wrap;pointer-events:none}
+small{opacity:.7}
+</style></head><body>
+<video id="vid" playsinline muted autoplay></video>
+<canvas id="ov"></canvas>
+<div id="hud"><span id="h1">starting</span><span id="h2"></span></div>
+<div id="log"></div>
+<div id="bar" hidden>
+  <button class="b" id="lock">Lock on plane</button>
+  <button class="b" id="minus">Heading −1°</button>
+  <button class="b" id="plus">Heading +1°</button>
+  <label>Zoom/FOV <input type="range" id="fov" min="35" max="85" value="50"></label>
+</div>
+<div id="start">
+  <h2 style="margin:0">Sightline Live</h2>
+  <div>Point the phone at the sky or landscape.<br>Planes and places are drawn over the camera. Portrait only.</div>
+  <button id="go">Start camera</button>
+  <small>Needs camera, location and motion permission.</small>
+</div>
+<script>
+(()=>{
+const $=id=>document.getElementById(id);
+const D2R=Math.PI/180,R=6371000;
+const vid=$('vid'),cv=$('ov'),ctx=cv.getContext('2d');
+const S={lat:null,lon:null,alt:0,acc:null,alpha:0,beta:0,gamma:0,compass:null,absOK:false,off:0,offSet:false,
+  hfov:50,planes:[],feats:[],routes:{},src:'-',srcErr:{},lastPoll:0,lastFeat:null};
+let logLines=[];
+function log(m){logLines.push(m);logLines=logLines.slice(-4);$('log').textContent=logLines.join('\n')}
+
+// ---- orientation maths -------------------------------------------------
+function rot(a,b,g){
+  const cA=Math.cos(a),sA=Math.sin(a),cB=Math.cos(b),sB=Math.sin(b),cG=Math.cos(g),sG=Math.sin(g);
+  return [[cA*cG-sA*sB*sG,-cB*sA,cG*sA*sB+cA*sG],
+          [cG*sA+cA*sB*sG,cA*cB,sA*sG-cA*cG*sB],
+          [-cB*sG,sB,cB*cG]];
+}
+function fwd(a,b,g){const M=rot(a,b,g);return[-M[0][2],-M[1][2],-M[2][2]]} // camera looks along -z
+function headingOf(F){return (Math.atan2(F[0],F[1])/D2R+360)%360}
+function pitchOf(F){return Math.asin(Math.max(-1,Math.min(1,F[2])))/D2R}
+function curView(){
+  const a=S.alpha*D2R,b=S.beta*D2R,g=S.gamma*D2R;
+  const F=fwd(a,b,g);
+  return{M:rot(a,b,g),h0:headingOf(F),pitch:pitchOf(F)};
+}
+// world (E,N,U) -> screen
+function project(v,view,W,H){
+  const o=S.off*D2R,c=Math.cos(o),s=Math.sin(o);
+  const E=v[0]*c-v[1]*s,N=v[0]*s+v[1]*c,U=v[2];
+  const M=view.M; // d = M^T * v
+  const dx=M[0][0]*E+M[1][0]*N+M[2][0]*U;
+  const dy=M[0][1]*E+M[1][1]*N+M[2][1]*U;
+  const dz=M[0][2]*E+M[1][2]*N+M[2][2]*U;
+  const depth=-dz; if(depth<=1e-6)return null;
+  const f=(W/2)/Math.tan(S.hfov*D2R/2);
+  return{x:W/2+f*dx/depth,y:H/2-f*dy/depth};
+}
+function trueHeading(){const v=curView();return (v.h0+S.off+360)%360}
+
+// ---- geo ----------------------------------------------------------------
+function enu(lat,lon,altM){
+  const dN=(lat-S.lat)*110540,dE=(lon-S.lon)*111320*Math.cos(S.lat*D2R);
+  const d=Math.hypot(dE,dN);
+  const drop=d*d*0.87/(2*R);
+  return{v:[dE,dN,altM-S.alt-drop],d,brg:(Math.atan2(dE,dN)/D2R+360)%360};
+}
+
+// ---- sensors --------------------------------------------------------------
+function onOri(e){
+  if(e.alpha==null)return;
+  if(e.type==='deviceorientationabsolute'){S.absOK=true;}
+  else if(S.absOK)return;
+  S.alpha=e.alpha;S.beta=e.beta;S.gamma=e.gamma;
+  if(typeof e.webkitCompassHeading==='number')S.compass=e.webkitCompassHeading;
+  if(!S.offSet){
+    if(S.absOK){S.off=0;S.offSet=true}
+    else if(S.compass!=null){
+      const v=curView();
+      // only trust the compass reading when the phone is roughly upright
+      if(v.pitch>-35&&v.pitch<60){
+        let d=S.compass-v.h0;d=((d+540)%360)-180;
+        S.off=S.off?S.off+0.15*(d-S.off):d;
+      }
+    }
+  }
+}
+async function startSensors(){
+  if(typeof DeviceOrientationEvent!=='undefined'&&DeviceOrientationEvent.requestPermission){
+    const r=await DeviceOrientationEvent.requestPermission();
+    if(r!=='granted')throw new Error('motion permission '+r);
+  }
+  addEventListener('deviceorientationabsolute',onOri,true);
+  addEventListener('deviceorientation',onOri,true);
+}
+function startGPS(){
+  navigator.geolocation.watchPosition(p=>{
+    const first=S.lat==null;
+    S.lat=p.coords.latitude;S.lon=p.coords.longitude;S.acc=p.coords.accuracy;
+    if(p.coords.altitude!=null)S.alt=p.coords.altitude;
+    if(first){pollPlanes();loadFeats()}
+  },e=>log('Location: '+e.message),{enableHighAccuracy:true,maximumAge:2000});
+}
+async function startCam(){
+  const st=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+  vid.srcObject=st;await vid.play();
+}
+
+// ---- aircraft -------------------------------------------------------------
+const feet=0.3048,kt=0.514444;
+function normReadsb(j){return(j.ac||j.aircraft||[]).filter(a=>a.lat!=null&&a.lon!=null).map(a=>({
+  hex:a.hex,call:(a.flight||'').trim(),type:a.t||'',reg:a.r||'',
+  alt:((a.alt_geom!=null?a.alt_geom:(typeof a.alt_baro==='number'?a.alt_baro:null)))*feet,
+  gs:(a.gs||0)*kt,trk:a.track!=null?a.track:0,vr:(a.baro_rate||0)*feet/60,lat:a.lat,lon:a.lon})).filter(a=>!isNaN(a.alt))}
+function normOpenSky(j){return(j.states||[]).filter(s=>s[5]!=null&&s[6]!=null&&!s[8]).map(s=>({
+  hex:s[0],call:(s[1]||'').trim(),type:'',reg:'',alt:(s[13]!=null?s[13]:(s[7]||0)),gs:s[9]||0,trk:s[10]||0,vr:s[11]||0,lat:s[6],lon:s[5]}))}
+function sources(){
+  const la=S.lat.toFixed(3),lo=S.lon.toFixed(3);
+  const list=[
+    ['adsb.one',`https://api.adsb.one/v2/point/${la}/${lo}/40`,normReadsb],
+    ['airplanes.live',`https://api.airplanes.live/v2/point/${la}/${lo}/40`,normReadsb],
+    ['adsb.lol',`https://api.adsb.lol/v2/point/${la}/${lo}/40`,normReadsb],
+    ['adsb.fi',`https://opendata.adsb.fi/api/v3/lat/${la}/lon/${lo}/dist/40`,normReadsb],
+    ['OpenSky',`https://opensky-network.org/api/states/all?lamin=${(S.lat-0.7).toFixed(2)}&lamax=${(S.lat+0.7).toFixed(2)}&lomin=${(S.lon-1.1).toFixed(2)}&lomax=${(S.lon+1.1).toFixed(2)}`,normOpenSky]
+  ];
+  let proxy='';try{proxy=localStorage.getItem('sl_proxy')||''}catch(e){}
+  if(proxy)list.unshift(['proxy',proxy.replace('{lat}',la).replace('{lon}',lo).replace('{nm}','40'),normReadsb]);
+  return list;
+}
+let pollBusy=false,goodSrc=null;
+async function pollPlanes(){
+  if(S.lat==null||pollBusy)return;pollBusy=true;
+  try{
+    let order=sources();
+    if(goodSrc)order.sort((a,b)=>(a[0]===goodSrc?-1:0)-(b[0]===goodSrc?-1:0));
+    for(const [name,url,norm] of order){
+      try{
+        const ctl=new AbortController();const t=setTimeout(()=>ctl.abort(),7000);
+        const r=await fetch(url,{signal:ctl.signal,cache:'no-store'});clearTimeout(t);
+        if(!r.ok)throw new Error('HTTP '+r.status);
+        const list=norm(await r.json());
+        const now=Date.now();
+        S.planes=list.map(p=>({...p,t0:now}));S.src=name;goodSrc=name;S.srcErr={};
+        for(const p of S.planes)if(p.call&&!(p.call in S.routes)){S.routes[p.call]=null;lookupRoute(p.call)}
+        return;
+      }catch(e){S.srcErr[name]=e.name==='AbortError'?'timeout':'blocked'}
+    }
+    S.src='none';
+  }finally{pollBusy=false}
+}
+async function lookupRoute(cs){
+  try{
+    const r=await fetch('https://api.adsbdb.com/v0/callsign/'+encodeURIComponent(cs));
+    if(!r.ok)return;const j=await r.json();const f=j.response&&j.response.flightroute;
+    if(f)S.routes[cs]={from:f.origin&&f.origin.iata_code,to:f.destination&&f.destination.iata_code,al:f.airline&&f.airline.name};
+  }catch(e){}
+}
+function planePos(p,now){ // dead-reckon between polls
+  const dt=Math.min(30,(now-p.t0)/1000),d=p.gs*dt,tr=p.trk*D2R;
+  const lat=p.lat+d*Math.cos(tr)/110540,lon=p.lon+d*Math.sin(tr)/(111320*Math.cos(p.lat*D2R));
+  return{lat,lon,alt:p.alt+p.vr*dt};
+}
+
+// ---- places (Wikipedia geosearch, CORS-friendly) ----------------------------
+async function loadFeats(){
+  if(S.lat==null)return;
+  S.lastFeat={lat:S.lat,lon:S.lon};
+  try{
+    const u='https://en.wikipedia.org/w/api.php?action=query&format=json&origin=*&generator=geosearch&ggscoord='+S.lat+'|'+S.lon+'&ggsradius=10000&ggslimit=60&prop=coordinates|description&colimit=60';
+    const j=await (await fetch(u)).json();
+    S.feats=Object.values((j.query&&j.query.pages)||{}).filter(p=>p.coordinates).map(p=>({name:p.title,desc:p.description||'',lat:p.coordinates[0].lat,lon:p.coordinates[0].lon}));
+    log(S.feats.length+' places loaded');
+  }catch(e){log('Places failed: '+e.message)}
+}
+
+// ---- drawing -----------------------------------------------------------------
+function fit(){const dpr=devicePixelRatio||1;cv.width=innerWidth*dpr;cv.height=innerHeight*dpr;ctx.setTransform(dpr,0,0,dpr,0,0)}
+addEventListener('resize',fit);
+const placed=[];
+function tag(x,y,lines,col,W,H){
+  ctx.font='600 12px system-ui';
+  const w=Math.max(...lines.map(l=>ctx.measureText(l).width))+12,h=lines.length*15+6;
+  let bx=Math.min(Math.max(4,x-w/2),W-w-4),by=y-h-14;
+  for(let k=0;k<12;k++){if(!placed.some(r=>bx<r.x+r.w&&bx+w>r.x&&by<r.y+r.h&&by+h>r.y))break;by-=h+2}
+  if(by<40)by=40;
+  placed.push({x:bx,y:by,w,h});
+  ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(Math.min(Math.max(bx+6,x),bx+w-6),by+h);ctx.stroke();
+  ctx.fillStyle='#000b';ctx.fillRect(bx,by,w,h);ctx.strokeRect(bx,by,w,h);
+  ctx.fillStyle='#fff';lines.forEach((l,i)=>ctx.fillText(l,bx+6,by+16+i*15));
+}
+function frame(){
+  requestAnimationFrame(frame);
+  const W=innerWidth,H=innerHeight;ctx.clearRect(0,0,W,H);placed.length=0;
+  const view=curView(),now=Date.now();
+  const th=(view.h0+S.off+360)%360;
+  $('h1').textContent=S.lat==null?'waiting for GPS':`${Math.round(th)}° · pitch ${Math.round(view.pitch)}°`+(S.offSet||S.compass!=null?'':' · no compass');
+  $('h2').textContent=`planes ${S.planes.length} (${S.src}) · ±${S.acc?Math.round(S.acc):'?'} m`;
+  // crosshair
+  ctx.strokeStyle='#fff6';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(W/2-12,H/2);ctx.lineTo(W/2+12,H/2);ctx.moveTo(W/2,H/2-12);ctx.lineTo(W/2,H/2+12);ctx.stroke();
+  if(S.lat==null)return;
+  // places
+  for(const f of S.feats){
+    const e=enu(f.lat,f.lon,S.alt);if(e.d<30)continue;
+    const p=project(e.v,view,W,H);if(!p||p.x<-20||p.x>W+20||p.y<30||p.y>H-40)continue;
+    ctx.fillStyle='#7bd88f';ctx.beginPath();ctx.arc(p.x,p.y,4,0,7);ctx.fill();
+    tag(p.x,p.y,[f.name,(e.d/1000).toFixed(1)+' km'],'#7bd88f',W,H);
+  }
+  // planes
+  for(const a of S.planes){
+    const q=planePos(a,now),e=enu(q.lat,q.lon,q.alt);
+    a._brg=e.brg;a._d=e.d;a._el=Math.atan2(e.v[2],e.d)/D2R;
+    const p=project(e.v,view,W,H);if(!p||p.x<-30||p.x>W+30||p.y<-30||p.y>H+30)continue;
+    a._p=p;
+    ctx.strokeStyle='#ffcc33';ctx.lineWidth=2;ctx.beginPath();ctx.arc(p.x,p.y,9,0,7);ctx.stroke();
+    const rt=S.routes[a.call],l=[a.call||a.hex.toUpperCase()+(a.type?' · '+a.type:'')];
+    if(rt)l.push((rt.from||'?')+' → '+(rt.to||'?')+(rt.al?' · '+rt.al:''));
+    l.push(Math.round(q.alt*3.281/100)*100+' ft · '+(e.d/1000).toFixed(1)+' km · '+Math.round(a.gs/kt)+' kt');
+    tag(p.x,p.y-9,l,'#ffcc33',W,H);
+  }
+  const errs=Object.keys(S.srcErr);
+  if(S.src==='none'&&errs.length)log('No aircraft source reachable ('+errs.join(', ')+'). See note on proxy.');
+}
+
+// ---- controls ------------------------------------------------------------------
+$('lock').onclick=()=>{
+  const th=trueHeading();let best=null,bd=1e9;
+  for(const a of S.planes){if(a._brg==null)continue;let d=((a._brg-th+540)%360)-180;if(Math.abs(d)<bd){bd=Math.abs(d);best={a,d}}}
+  if(!best||bd>30){log('Centre a plane in the crosshair first, then tap Lock.');return}
+  S.off+=best.d;S.offSet=true;log('Heading corrected by '+best.d.toFixed(1)+'° using '+(best.a.call||best.a.hex));
+};
+$('minus').onclick=()=>{S.off-=1;S.offSet=true};
+$('plus').onclick=()=>{S.off+=1;S.offSet=true};
+$('fov').oninput=e=>{S.hfov=+e.target.value};
+addEventListener('click',e=>{if(e.target.closest('#bar,#start'))return;});
+
+$('go').onclick=async()=>{
+  try{
+    const mp=startSensors(); // permission request stays inside the tap
+    await mp;
+    startGPS();
+    await startCam();
+    $('start').hidden=true;$('bar').hidden=false;fit();frame();
+    setInterval(pollPlanes,6000);
+    setInterval(()=>{if(S.lastFeat&&S.lat!=null){const d=Math.hypot((S.lat-S.lastFeat.lat)*110540,(S.lon-S.lastFeat.lon)*111320*Math.cos(S.lat*D2R));if(d>1500)loadFeats()}},15000);
+  }catch(e){alert('Could not start: '+e.message)}
+};
+})();
+</script></body></html>
