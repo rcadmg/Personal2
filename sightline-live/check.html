@@ -118,8 +118,16 @@ $('snap').onclick=()=>{
 const SOURCES=[
   {name:'airplanes.live',url:(la,lo)=>`https://api.airplanes.live/v2/point/${la}/${lo}/25`,list:j=>j.ac},
   {name:'adsb.lol',url:(la,lo)=>`https://api.adsb.lol/v2/point/${la}/${lo}/25`,list:j=>j.ac},
-  {name:'adsb.fi',url:(la,lo)=>`https://opendata.adsb.fi/api/v3/lat/${la}/lon/${lo}/dist/25`,list:j=>j.aircraft||j.ac}
+  {name:'adsb.fi',url:(la,lo)=>`https://opendata.adsb.fi/api/v3/lat/${la}/lon/${lo}/dist/25`,list:j=>j.aircraft||j.ac},
+  {name:'adsb.one',url:(la,lo)=>`https://api.adsb.one/v2/point/${la}/${lo}/25`,list:j=>j.ac||j.aircraft},
+  {name:'OpenSky',url:(la,lo)=>{la=+la;lo=+lo;return `https://opensky-network.org/api/states/all?lamin=${(la-1.5).toFixed(2)}&lamax=${(la+1.5).toFixed(2)}&lomin=${(lo-2.5).toFixed(2)}&lomax=${(lo+2.5).toFixed(2)}`},
+    list:j=>(j.states||[]).map(s=>({flight:s[1],t:'',alt_baro:s[7]!=null?Math.round(s[7]*3.281):'?',gs:s[9]!=null?s[9]*1.944:null}))}
 ];
+async function reach(url){
+  // no-cors: resolves if the server answered at all, so CORS is then the only blocker
+  try{await fetch(url,{mode:'no-cors',cache:'no-store'});return 'server reachable, so CORS is the blocker'}
+  catch(e){return 'server not reachable at all (network or DNS blocked)'}
+}
 async function flights(pos){
   let callsign=null;
   for(const s of SOURCES){
@@ -131,7 +139,7 @@ async function flights(pos){
       if(named&&!callsign)callsign=named.flight.trim();
       const sample=named?` e.g. ${named.flight.trim()} ${named.t||''} at ${named.alt_baro} ft, ${named.gs!=null?Math.round(named.gs):'?'} kt`:'';
       set(list.length?'ok':'warn',`${list.length} aircraft within 25 nm in ${ms} ms.${sample}${list.length?'':' None right now, or a quiet area.'}`);
-    }catch(e){set('fail',why(e))}
+    }catch(e){set('fail',why(e)+' ['+await reach(s.url(pos.lat.toFixed(3),pos.lon.toFixed(3)))+']')}
     await wait(1100);
   }
   const set=row('Route lookup: adsbdb');
