@@ -62,6 +62,14 @@ canvas.pinning{cursor:crosshair}
 .selbar .txt{flex:1 1 220px;min-width:0}
 .selbar strong{font:700 15px/1.2 var(--font-head);display:block;overflow-wrap:anywhere}
 .selbar span{font:400 12px/1.4 var(--font-mono);color:var(--muted)}
+ .progress{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.ptrack{height:8px;border-radius:99px;background:var(--bg);overflow:hidden}
+.pfill{height:100%;width:0;background:var(--accent);border-radius:99px;transition:width .4s}
+.pfill.busy{background-image:repeating-linear-gradient(45deg,rgba(255,255,255,.3) 0 10px,transparent 10px 20px);background-size:28px 28px;animation:pstripe 1s linear infinite}
+@keyframes pstripe{to{background-position:28px 0}}
+@media (prefers-reduced-motion:reduce){.pfill.busy{animation:none}}
+.ptext{display:flex;justify-content:space-between;gap:12px;margin-top:6px;font-size:12px;color:var(--muted)}
+.ptext span:last-child{font-family:var(--font-mono)}
 .status{min-height:20px;color:var(--muted);font-size:13px}
 .status.err{color:var(--warn)}
 .side{display:flex;flex-direction:column;gap:14px;min-width:0}
@@ -139,6 +147,11 @@ ol.list small{font:400 11px/1.3 var(--font-mono);color:var(--muted)}
     <div class="canvaswrap" id="canvasWrap" hidden>
       <canvas id="cv" tabindex="0" aria-label="Photo with geographic labels. Drag sideways or use the arrow keys to turn the view."></canvas>
       <div class="pinhint" id="pinHint" hidden></div>
+    </div>
+
+    <div class="progress" id="progress" role="status" hidden>
+      <div class="ptrack"><div class="pfill busy" id="pfill"></div></div>
+      <div class="ptext"><span id="pstage">Starting…</span><span id="ptime">0s</span></div>
     </div>
 
     <dl class="facts" id="facts" hidden>
@@ -382,30 +395,48 @@ async function searchPlace(q){
 }
 
 /* ---------- OpenStreetMap features ---------- */
-function buildQuery(lat,lon,r){
+function stageQueries(lat,lon,r){
   const a=`(around:${r},${lat},${lon})`;
-  return `[out:json][timeout:45];(
-node${a}["natural"~"^(peak|volcano|saddle|cape|glacier|hot_spring|bay)$"]["name"];
+  const notRiver='["water"!~"^(river|stream|canal|ditch|drain)$"]';
+  return [
+    {label:'places and peaks',q:`[out:json][timeout:30];(
+node${a}["natural"~"^(peak|volcano|saddle)$"]["name"];
 node${a}["mountain_pass"="yes"]["name"];
-node${a}["place"~"^(city|town|village|hamlet|island|islet|sea|ocean)$"]["name"];
+node${a}["place"~"^(city|town|village|hamlet|suburb|island|islet|sea|ocean)$"]["name"];
+);out center tags 2500;`},
+    {label:'lakes, bays and glaciers',q:`[out:json][timeout:30];(
+node${a}["natural"~"^(bay|glacier)$"]["name"];
+way${a}["natural"="water"]["name"]${notRiver};
+relation${a}["natural"="water"]["name"]${notRiver};
+way${a}["natural"~"^(bay|glacier)$"]["name"];
+way${a}["place"="island"]["name"];
+);out center tags 800;`},
+    {label:'viewpoints and landmarks',q:`[out:json][timeout:30];(
+node${a}["natural"~"^(cape|hot_spring)$"]["name"];
 node${a}["tourism"="viewpoint"]["name"];
 node${a}["man_made"="lighthouse"]["name"];
 node${a}["historic"="castle"]["name"];
 node${a}["waterway"="waterfall"]["name"];
-way${a}["natural"~"^(water|bay|glacier)$"]["name"];
-relation${a}["natural"~"^(water|bay|glacier)$"]["name"];
-way${a}["place"="island"]["name"];
-);out center tags 3000;`;
+);out center tags 800;`}
+  ];
+}
+async function overpassOnce(host,q,ms){
+  const ac=new AbortController(),to=setTimeout(()=>ac.abort(),ms);
+  try{
+    const r=await fetch(host,{method:'POST',body:'data='+encodeURIComponent(q),headers:{'Content-Type':'application/x-www-form-urlencoded'},signal:ac.signal});
+    if(!r.ok)throw new Error('server answered '+r.status);
+    const j=await r.json();
+    if(j.remark&&/error|timed out|out of memory/i.test(j.remark)&&!(j.elements&&j.elements.length))
+      throw new Error('server too busy');
+    return j;
+  }finally{clearTimeout(to)}
 }
 async function overpass(q){
   const hosts=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter'];
   let last;
   for(const h of hosts){
-    try{
-      const r=await fetch(h,{method:'POST',body:'data='+encodeURIComponent(q),headers:{'Content-Type':'application/x-www-form-urlencoded'}});
-      if(!r.ok)throw new Error('HTTP '+r.status);
-      return await r.json();
-    }catch(e){last=e}
+    try{return await overpassOnce(h,q,35000)}
+    catch(e){last=e.name==='AbortError'?new Error('no answer in time'):e}
   }
   throw last;
 }
@@ -420,7 +451,7 @@ function classify(t){
   }
   if(t.natural==='bay')return['water','Bay'];
   if(t.place==='sea'||t.place==='ocean')return['water','Sea'];
-  if(['city','town','village','hamlet'].includes(t.place))return['place',t.place[0].toUpperCase()+t.place.slice(1)];
+  if(['city','town','village','hamlet','suburb'].includes(t.place))return['place',t.place[0].toUpperCase()+t.place.slice(1)];
   if(t.place==='island'||t.place==='islet')return['landmark','Island'];
   if(t.natural==='cape')return['landmark','Cape'];
   if(t.natural==='hot_spring')return['landmark','Hot spring'];
@@ -430,16 +461,35 @@ function classify(t){
   if(t.waterway==='waterfall')return['landmark','Waterfall'];
   return null;
 }
+const PR={timer:0,t0:0,stageT0:0,done:0,total:4,label:''};
+function progStart(total){
+  PR.total=total;PR.t0=PR.stageT0=Date.now();PR.done=0;PR.label='starting';
+  $('progress').hidden=false;$('pfill').classList.add('busy');
+  clearInterval(PR.timer);PR.timer=setInterval(progTick,250);progTick();
+}
+function progStage(done,label){PR.done=done;PR.stageT0=Date.now();PR.label=label;progTick()}
+function progTick(){
+  const t=(Date.now()-PR.stageT0)/1000,step=100/PR.total;
+  $('pfill').style.width=Math.min(100,PR.done*step+(1-Math.exp(-t/12))*.92*step)+'%';
+  $('pstage').textContent='Step '+Math.min(PR.done+1,PR.total)+' of '+PR.total+': '+PR.label+(t>20?' (server is slow, still trying)':'');
+  $('ptime').textContent=Math.round((Date.now()-PR.t0)/1000)+'s';
+}
+function progEnd(tok,text){
+  clearInterval(PR.timer);$('pfill').classList.remove('busy');$('pfill').style.width='100%';
+  $('pstage').textContent=text;$('ptime').textContent=Math.round((Date.now()-PR.t0)/1000)+'s';
+  setTimeout(()=>{if(tok===S.token)$('progress').hidden=true},3500);
+}
 async function findFeatures(){
   if(S.lat==null)return;
   const tok=++S.token;
   S.radiusKm=+$('radius').value;
-  status('Looking up features within '+S.radiusKm+' km…');
-  try{
-    const data=await overpass(buildQuery(S.lat,S.lon,S.radiusKm*1000));
-    if(tok!==S.token)return;
-    const seen=new Set(),out=[];let id=0;
-    for(const el of data.elements||[]){
+  S.feats=[];listKey='';mapKey='';scheduleDraw();
+  const stages=stageQueries(S.lat,S.lon,S.radiusKm*1000);
+  progStart(stages.length+1);status('');
+  const seen=new Set();let nextId=0;
+  const ingest=els=>{
+    let n=0;
+    for(const el of els){
       const t=el.tags||{};if(!t.name)continue;
       const c=classify(t);if(!c)continue;
       const lat=el.lat??(el.center&&el.center.lat),lon=el.lon??(el.center&&el.center.lon);
@@ -447,18 +497,44 @@ async function findFeatures(){
       const key=t.name.toLowerCase()+'|'+c[1]+'|'+lat.toFixed(2)+','+lon.toFixed(2);
       if(seen.has(key))continue;seen.add(key);
       const ele=parseFloat(String(t.ele||'').replace(',','.'));
-      const f={id:id++,name:t.name,cat:c[0],sub:c[1],lat,lon,
+      const f={id:nextId++,name:t.name,cat:c[0],sub:c[1],lat,lon,
         ele:Number.isFinite(ele)?ele:null,eleSrc:Number.isFinite(ele)?'osm':'',eleTried:false};
       f.dist=haversine(S.lat,S.lon,lat,lon);f.bearing=bearingTo(S.lat,S.lon,lat,lon);
-      if(f.dist>=50)out.push(f);
+      if(f.dist>=50){S.feats.push(f);n++}
     }
-    S.feats=out;listKey='';mapKey='';
-    status(out.length?'Found '+out.length+' named features. Turn the view or change what is shown to explore them.':'No named features found nearby. Try a larger search radius.');
-    scheduleDraw();queueElev();
-  }catch(e){
-    if(tok!==S.token)return;
-    status('Could not reach OpenStreetMap ('+(e&&e.message?e.message:'network error')+'). Check your connection and press Search again.',true);
+    return n;
+  };
+  const failed=[];
+  for(let i=0;i<stages.length;i++){
+    progStage(i,'looking up '+stages[i].label);
+    try{
+      const data=await overpass(stages[i].q);
+      if(tok!==S.token)return;
+      ingest(data.elements||[]);
+      listKey='';mapKey='';scheduleDraw();
+    }catch(e){
+      if(tok!==S.token)return;
+      failed.push(stages[i].label+' ('+(e&&e.message?e.message:'network error')+')');
+    }
   }
+  if(tok!==S.token)return;
+  if(S.feats.length){
+    progStage(stages.length,'looking up heights');
+    await runElev();
+    if(tok!==S.token)return;
+  }
+  const n=S.feats.length;
+  if(n){
+    progEnd(tok,'Done: '+n+' named features');
+    status('Found '+n+' named features.'+(failed.length?' Could not load: '+failed.join('; ')+'. Press Search again to retry.':' Turn the view or change what is shown to explore them.'),failed.length>0);
+  }else if(failed.length===stages.length){
+    progEnd(tok,'Search failed');
+    status('OpenStreetMap did not answer: '+failed[0]+'. Check your connection, try a smaller search radius, then press Search again.',true);
+  }else{
+    progEnd(tok,'Search finished');
+    status(failed.length?'Some lookups failed ('+failed.join('; ')+') and nothing was found by the others. Press Search again.':'No named features within '+S.radiusKm+' km. Try a larger search radius.',failed.length>0);
+  }
+  scheduleDraw();
 }
 let elevTimer=0,elevBusy=false;
 function queueElev(){clearTimeout(elevTimer);elevTimer=setTimeout(runElev,500)}
