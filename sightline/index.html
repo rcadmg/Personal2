@@ -396,28 +396,32 @@ async function searchPlace(q){
 
 /* ---------- OpenStreetMap features ---------- */
 function stageQueries(lat,lon,r){
-  const a=`(around:${r},${lat},${lon})`;
+  const ar=`(around:${r},${lat},${lon})`;
+  // Tag filters come first so the server uses its tag index, then narrows by distance.
+  const nodes=(key,vals,extra='')=>vals.map(v=>`node["${key}"="${v}"]["name"]${extra}${ar};`).join('\n');
+  const wrap=(body,limit)=>`[out:json][timeout:25];(\n${body}\n);out center tags ${limit};`;
   const notRiver='["water"!~"^(river|stream|canal|ditch|drain)$"]';
   return [
-    {label:'places and peaks',q:`[out:json][timeout:30];(
-node${a}["natural"~"^(peak|volcano|saddle)$"]["name"];
-node${a}["mountain_pass"="yes"]["name"];
-node${a}["place"~"^(city|town|village|hamlet|suburb|island|islet|sea|ocean)$"]["name"];
-);out center tags 2500;`},
-    {label:'lakes, bays and glaciers',q:`[out:json][timeout:30];(
-node${a}["natural"~"^(bay|glacier)$"]["name"];
-way${a}["natural"="water"]["name"]${notRiver};
-relation${a}["natural"="water"]["name"]${notRiver};
-way${a}["natural"~"^(bay|glacier)$"]["name"];
-way${a}["place"="island"]["name"];
-);out center tags 800;`},
-    {label:'viewpoints and landmarks',q:`[out:json][timeout:30];(
-node${a}["natural"~"^(cape|hot_spring)$"]["name"];
-node${a}["tourism"="viewpoint"]["name"];
-node${a}["man_made"="lighthouse"]["name"];
-node${a}["historic"="castle"]["name"];
-node${a}["waterway"="waterfall"]["name"];
-);out center tags 800;`}
+    {label:'places and peaks',q:wrap([
+      nodes('natural',['peak','volcano','saddle']),
+      nodes('mountain_pass',['yes']),
+      nodes('place',['city','town','village','hamlet','suburb','island','islet','sea','ocean'])
+    ].join('\n'),2500)},
+    {label:'lakes, bays and glaciers',q:wrap([
+      nodes('natural',['bay','glacier']),
+      `way["natural"="water"]["name"]${notRiver}${ar};`,
+      `relation["natural"="water"]["name"]${notRiver}${ar};`,
+      `way["natural"="bay"]["name"]${ar};`,
+      `way["natural"="glacier"]["name"]${ar};`,
+      `way["place"="island"]["name"]${ar};`
+    ].join('\n'),800)},
+    {label:'viewpoints and landmarks',q:wrap([
+      nodes('natural',['cape','hot_spring']),
+      nodes('tourism',['viewpoint']),
+      nodes('man_made',['lighthouse']),
+      nodes('historic',['castle']),
+      nodes('waterway',['waterfall'])
+    ].join('\n'),800)}
   ];
 }
 async function overpassOnce(host,q,ms){
@@ -432,10 +436,10 @@ async function overpassOnce(host,q,ms){
   }finally{clearTimeout(to)}
 }
 async function overpass(q){
-  const hosts=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter'];
+  const hosts=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter'];
   let last;
   for(const h of hosts){
-    try{return await overpassOnce(h,q,35000)}
+    try{return await overpassOnce(h,q,28000)}
     catch(e){last=e.name==='AbortError'?new Error('no answer in time'):e}
   }
   throw last;
