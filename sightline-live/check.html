@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sightline Live Check</title>
+<style>
+:root{--bg:#e7edf0;--panel:#f6f9fa;--ink:#0f2330;--muted:#556b78;--line:#c8d4da;--accent:#0b6c8c;--on:#fff;--ok:#1d7a46;--bad:#a33a1b;--warn:#8a6a00;
+--mono:ui-monospace,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#0a141a;--panel:#111f27;--ink:#e3edf2;--muted:#8ba2ae;--line:#23353f;--accent:#4cc3e6;--on:#06222c;--ok:#5fd18d;--bad:#ff8a66;--warn:#e8c14d;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;padding:16px max(16px,env(safe-area-inset-right)) 48px max(16px,env(safe-area-inset-left))}
+main{max-width:640px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+h1{font-size:20px;margin:6px 0 0}
+p{margin:0;color:var(--muted)}
+button{font:600 15px system-ui;padding:12px 16px;border-radius:10px;border:1px solid var(--accent);background:var(--accent);color:var(--on);cursor:pointer}
+button.alt{background:var(--panel);color:var(--ink);border-color:var(--line)}
+button:disabled{opacity:.5}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.row{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;padding:8px 0;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.chip{font:600 11px var(--mono);text-transform:uppercase;padding:3px 7px;border-radius:99px;border:1px solid var(--line);color:var(--muted);align-self:start;margin-top:2px}
+.chip.ok{color:var(--ok);border-color:var(--ok)}.chip.fail{color:var(--bad);border-color:var(--bad)}.chip.warn{color:var(--warn);border-color:var(--warn)}.chip.run{color:var(--accent);border-color:var(--accent)}
+.row b{display:block}
+.row span.t{font:13px/1.4 var(--mono);color:var(--muted);overflow-wrap:anywhere}
+table{width:100%;border-collapse:collapse;font:13px var(--mono)}
+td{padding:3px 0;border-top:1px solid var(--line)}td:last-child{text-align:right}
+video{width:100%;max-height:220px;object-fit:cover;border-radius:10px;background:#000}
+pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.4 var(--mono);color:var(--muted)}
+.btns{display:flex;gap:8px;flex-wrap:wrap}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <h1>Sightline Live: device check</h1>
+  <p>Tap Run and allow location, motion and camera when asked. It takes about 30 seconds and checks everything the live view will need.</p>
+  <div class="btns"><button id="run">Run checks</button><button id="copy" class="alt" hidden>Copy results</button></div>
+  <div class="card" id="checks" hidden></div>
+  <video id="cam" playsinline muted autoplay hidden></video>
+  <div class="card" id="sensorCard" hidden>
+    <b>Compass and tilt, live</b>
+    <p style="margin:2px 0 8px">Hold the phone upright, camera facing away from you. Point it at something with a known direction, then tap Snapshot.</p>
+    <table id="sensorTable"></table>
+    <div class="btns" style="margin-top:10px"><button id="snap" class="alt">Snapshot</button></div>
+  </div>
+  <div class="card" id="logCard" hidden><pre id="log"></pre></div>
+</main>
+<script>
+(()=>{
+'use strict';
+const $=id=>document.getElementById(id),RAD=Math.PI/180;
+const lines=[];
+function log(t){lines.push(t);$('log').textContent=lines.join('\n');$('logCard').hidden=false}
+function row(title){
+  const box=$('checks');box.hidden=false;
+  const r=document.createElement('div');r.className='row';
+  const chip=document.createElement('span');chip.className='chip run';chip.textContent='run';
+  const body=document.createElement('div'),b=document.createElement('b'),t=document.createElement('span');
+  t.className='t';b.textContent=title;body.append(b,t);r.append(chip,body);box.append(r);
+  return(state,text)=>{chip.className='chip '+state;chip.textContent=state==='run'?'run':state;t.textContent=text||'';log('['+state.toUpperCase()+'] '+title+(text?': '+text:''))};
+}
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+function why(e){
+  if(e&&e.name==='AbortError')return'no answer in 12 s';
+  if(e&&/failed to fetch|load failed|networkerror/i.test(e.message||''))return'blocked by the browser or offline (usually CORS)';
+  return(e&&e.message)||'error';
+}
+async function getJSON(url){
+  const ac=new AbortController(),to=setTimeout(()=>ac.abort(),12000),t0=performance.now();
+  try{
+    const r=await fetch(url,{signal:ac.signal});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return{data:await r.json(),ms:Math.round(performance.now()-t0)};
+  }finally{clearTimeout(to)}
+}
+
+/* camera forward direction from DeviceOrientation angles (phone upright, back camera) */
+function forward(aDeg,bDeg,gDeg){
+  const a=aDeg*RAD,b=bDeg*RAD,g=gDeg*RAD;
+  const fx=-Math.sin(g)*Math.cos(a)-Math.cos(g)*Math.sin(b)*Math.sin(a);
+  const fy=-Math.sin(g)*Math.sin(a)+Math.cos(g)*Math.sin(b)*Math.cos(a);
+  const fz=-Math.cos(g)*Math.cos(b);
+  return{heading:(Math.atan2(fx,fy)/RAD+360)%360,pitch:Math.asin(Math.max(-1,Math.min(1,fz)))/RAD};
+}
+const last={abs:null,rel:null};
+function startSensors(){
+  const on=(type,key)=>window.addEventListener(type,e=>{last[key]={a:e.alpha,b:e.beta,g:e.gamma,abs:e.absolute,ch:e.webkitCompassHeading,acc:e.webkitCompassAccuracy,t:Date.now()}},true);
+  on('deviceorientationabsolute','abs');on('deviceorientation','rel');
+  $('sensorCard').hidden=false;
+  setInterval(renderSensors,250);
+}
+const f1=v=>v==null||!Number.isFinite(v)?'n/a':v.toFixed(1)+'°';
+function snapshotData(){
+  const s=last.abs&&last.abs.a!=null?last.abs:last.rel;
+  if(!s||s.a==null)return null;
+  const f=forward(s.a,s.b,s.g);
+  return{src:last.abs&&last.abs.a!=null?'absolute event':'relative event',alpha:s.a,beta:s.b,gamma:s.g,absolute:s.abs,compass:s.ch,heading:f.heading,pitch:f.pitch};
+}
+function renderSensors(){
+  const d=snapshotData(),tb=$('sensorTable');
+  const rows=d?[
+    ['event used',d.src],['alpha / beta / gamma',[d.alpha,d.beta,d.gamma].map(f1).join('  ')],
+    ['event says absolute',String(d.absolute)],
+    ['iPhone compass heading',f1(d.compass)],
+    ['camera heading (tilt maths)',f1(d.heading)],['camera pitch (up is +)',f1(d.pitch)]
+  ]:[['status','no motion data yet. Move the phone.']];
+  tb.textContent='';
+  for(const [k,v] of rows){const tr=document.createElement('tr'),a=document.createElement('td'),b=document.createElement('td');a.textContent=k;b.textContent=v;tr.append(a,b);tb.append(tr)}
+}
+$('snap').onclick=()=>{
+  const d=snapshotData();
+  if(!d){log('[SNAPSHOT] no motion data');return}
+  log('[SNAPSHOT] '+d.src+' alpha '+f1(d.alpha)+' beta '+f1(d.beta)+' gamma '+f1(d.gamma)+' absolute '+d.absolute+' iphoneCompass '+f1(d.compass)+' cameraHeading '+f1(d.heading)+' pitch '+f1(d.pitch));
+};
+
+/* flight sources */
+const SOURCES=[
+  {name:'airplanes.live',url:(la,lo)=>`https://api.airplanes.live/v2/point/${la}/${lo}/25`,list:j=>j.ac},
+  {name:'adsb.lol',url:(la,lo)=>`https://api.adsb.lol/v2/point/${la}/${lo}/25`,list:j=>j.ac},
+  {name:'adsb.fi',url:(la,lo)=>`https://opendata.adsb.fi/api/v3/lat/${la}/lon/${lo}/dist/25`,list:j=>j.aircraft||j.ac}
+];
+async function flights(pos){
+  let callsign=null;
+  for(const s of SOURCES){
+    const set=row('Aircraft data: '+s.name);
+    try{
+      const {data,ms}=await getJSON(s.url(pos.lat.toFixed(3),pos.lon.toFixed(3)));
+      const list=s.list(data)||[];
+      const named=list.find(a=>a.flight&&a.flight.trim());
+      if(named&&!callsign)callsign=named.flight.trim();
+      const sample=named?` e.g. ${named.flight.trim()} ${named.t||''} at ${named.alt_baro} ft, ${named.gs!=null?Math.round(named.gs):'?'} kt`:'';
+      set(list.length?'ok':'warn',`${list.length} aircraft within 25 nm in ${ms} ms.${sample}${list.length?'':' None right now, or a quiet area.'}`);
+    }catch(e){set('fail',why(e))}
+    await wait(1100);
+  }
+  const set=row('Route lookup: adsbdb');
+  try{
+    const cs=callsign||'BAW123';
+    const {data,ms}=await getJSON('https://api.adsbdb.com/v0/callsign/'+encodeURIComponent(cs));
+    const fr=data.response&&data.response.flightroute;
+    set('ok',fr?`${cs}: ${fr.origin&&fr.origin.iata_code} to ${fr.destination&&fr.destination.iata_code}, ${fr.airline&&fr.airline.name} (${ms} ms)`:`reachable (${ms} ms), no route known for ${cs}`);
+  }catch(e){set(/404/.test(e.message)?'warn':'fail',/404/.test(e.message)?'reachable, callsign not found':why(e))}
+}
+
+$('run').onclick=async()=>{
+  const btn=$('run');btn.disabled=true;$('checks').textContent='';lines.length=0;
+  // motion permission must be requested straight from the tap
+  let motionPromise=null;
+  if(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission==='function')
+    motionPromise=DeviceOrientationEvent.requestPermission();
+  const sm=row('Motion and compass permission');
+  try{
+    const res=motionPromise?await motionPromise:'granted';
+    if(res!=='granted')throw new Error('permission '+res);
+    startSensors();sm('ok',motionPromise?'allowed (iPhone style prompt)':'no prompt needed on this browser');
+  }catch(e){sm('fail',why(e))}
+
+  const sg=row('Your position');let pos={lat:51.5074,lon:-0.1278};
+  try{
+    const p=await new Promise((ok,no)=>navigator.geolocation.getCurrentPosition(ok,no,{enableHighAccuracy:true,timeout:15000}));
+    pos={lat:p.coords.latitude,lon:p.coords.longitude};
+    sg('ok',`${pos.lat.toFixed(4)}, ${pos.lon.toFixed(4)}, accurate to ${Math.round(p.coords.accuracy)} m, altitude ${p.coords.altitude==null?'n/a':Math.round(p.coords.altitude)+' m'}`);
+  }catch(e){sg('fail',(e&&e.message)||'no position. Using central London for the data checks.')}
+
+  const sc=row('Camera');
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+    const v=$('cam');v.srcObject=stream;v.hidden=false;await v.play().catch(()=>{});
+    const st=stream.getVideoTracks()[0].getSettings();
+    sc('ok',`rear camera preview running, ${st.width||'?'}x${st.height||'?'}`);
+  }catch(e){sc('fail',why(e))}
+
+  await flights(pos);
+  const sm2=row('Summary');
+  const fails=lines.filter(l=>l.startsWith('[FAIL]')).length;
+  sm2(fails?'warn':'ok',fails?fails+' check(s) failed. Tap Copy results and send them to me.':'Everything the live view needs is working.');
+  $('copy').hidden=false;btn.disabled=false;btn.textContent='Run again';
+};
+$('copy').onclick=async()=>{
+  const text=lines.join('\n');
+  try{await navigator.clipboard.writeText(text);$('copy').textContent='Copied'}
+  catch(e){const r=document.createRange();r.selectNodeContents($('log'));const s=getSelection();s.removeAllRanges();s.addRange(r);$('copy').textContent='Selected, now copy'}
+};
+})();
+</script>
+</body>
+</html>
